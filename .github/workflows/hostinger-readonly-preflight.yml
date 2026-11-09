@@ -1,0 +1,55 @@
+name: 'Hostinger #1568 — fixed GET-only preflight'
+
+# Public inventory: this workflow, scripts/hostinger_preflight.py and
+# tests/test_hostinger_preflight.py only. No application/history/customer files.
+# Owner adds HOSTINGER_API_TOKEN only after the PUBLIC control repo environment
+# apache-parity-bootstrap is read back with sole JSMJapan reviewer, self-review
+# allowed, admin bypass disabled and custom deployment branch exactly main.
+# Token creation: https://hpanel.hostinger.com/profile/api — name + short expiry.
+# Hostinger tokens inherit creator privileges; this workflow permits reads only.
+on:
+  pull_request:
+    paths: ['.github/workflows/hostinger-readonly-preflight.yml', 'scripts/hostinger_preflight.py', 'tests/test_hostinger_preflight.py']
+  push:
+    branches: [main]
+    paths: ['.github/workflows/hostinger-readonly-preflight.yml', 'scripts/hostinger_preflight.py', 'tests/test_hostinger_preflight.py']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hostinger-readonly-preflight
+  cancel-in-progress: false
+
+jobs:
+  offline:
+    name: 'Offline Hostinger preflight'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - run: python3 -B -m unittest discover -s tests -p 'test_hostinger_preflight.py'
+
+  provider:
+    name: 'Read-only fixed VPS inventory'
+    needs: offline
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.repository == 'JSMJapan/jsm-release-control' &&
+      github.event.repository.private == false && github.actor == 'JSMJapan' &&
+      github.triggering_actor == 'JSMJapan' && github.ref == 'refs/heads/main' && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    environment: apache-parity-bootstrap
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: 'Verify public protection, then GET only the bound VPS and root-key count'
+        env:
+          HOSTINGER_API_TOKEN: ${{ secrets.HOSTINGER_API_TOKEN }}
+        run: python3 -I -B scripts/hostinger_preflight.py
