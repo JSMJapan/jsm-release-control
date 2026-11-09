@@ -1,0 +1,21 @@
+{
+  "schema": "jsm-apache-public-bridge-v1",
+  "control_repository": "JSMJapan/jsm-release-control",
+  "source_repository": "JSMJapan/jsm-storefront",
+  "resource": "hostinger:srv1687281",
+  "domain": "jsmjapan.com",
+  "admission": "UNESTABLISHED",
+  "source_pr": 1905,
+  "reviewed_head_sha": "45f8cc9c264f86c008cf4cd352c1ff5d2a12ca47",
+  "source_merge_sha": null,
+  "builder_sha": null,
+  "pack_run_id": null,
+  "artifact_id": null,
+  "archive_sha256": null,
+  "inventory_sha256": null,
+  "bundle_sha256": null,
+  "payload_sha256": null,
+  "binding_sha256": null,
+  "deployment_authorized": false,
+  "executable_sha256": null
+}

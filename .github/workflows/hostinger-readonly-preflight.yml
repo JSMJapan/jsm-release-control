@@ -10,10 +10,10 @@ name: 'Hostinger #1568 — fixed GET-only preflight'
 # Hostinger tokens inherit creator privileges; this workflow permits reads only.
 on:
   pull_request:
-    paths: ['.github/workflows/hostinger-readonly-preflight.yml', 'scripts/hostinger_preflight.py', 'tests/test_hostinger_preflight.py', '.github/workflows/apache-admin-readonly-probe.yml', 'scripts/apache_admin_readonly_probe.py', 'tests/test_apache_admin_readonly_probe.py']
+    paths: ['.github/workflows/hostinger-readonly-preflight.yml', 'scripts/hostinger_preflight.py', 'tests/test_hostinger_preflight.py', '.github/workflows/apache-admin-readonly-probe.yml', 'scripts/apache_admin_readonly_probe.py', 'tests/test_apache_admin_readonly_probe.py', 'scripts/apache_parity_bridge.py', 'scripts/apache_parity_binding.json', 'tests/test_apache_parity_bridge.py']
   push:
     branches: [main]
-    paths: ['.github/workflows/hostinger-readonly-preflight.yml', 'scripts/hostinger_preflight.py', 'tests/test_hostinger_preflight.py', '.github/workflows/apache-admin-readonly-probe.yml', 'scripts/apache_admin_readonly_probe.py', 'tests/test_apache_admin_readonly_probe.py']
+    paths: ['.github/workflows/hostinger-readonly-preflight.yml', 'scripts/hostinger_preflight.py', 'tests/test_hostinger_preflight.py', '.github/workflows/apache-admin-readonly-probe.yml', 'scripts/apache_admin_readonly_probe.py', 'tests/test_apache_admin_readonly_probe.py', 'scripts/apache_parity_bridge.py', 'scripts/apache_parity_binding.json', 'tests/test_apache_parity_bridge.py']
   workflow_dispatch: {}
 
 permissions:
