@@ -92,13 +92,70 @@ class InstalledRouteTests(unittest.TestCase):
                     root_diagnostic=self.root_receipt() if child is None else child)
 
     def test_source_pins_paths_and_no_live_inputs_are_fixed(self):
-        self.assertEqual(len(self.m.CODE_FILES), 6); self.assertEqual(len(self.m.SITE_FILES), 3)
+        self.assertEqual(len(self.m.CODE_FILES), 25); self.assertEqual(len(self.m.SITE_FILES), 3)
         self.assertEqual(self.m.CODE_FILES[0], ('lot', '/srv/jsm/app/backend/api/modules/v1/controllers/LotController.php',
             14918, 'dc50c9e035e9e1b89b185488e6277bd712194f56b9619c1b8599cf62c471aee1'))
         self.assertEqual(self.m.UNITS, ('jsm-front.service', 'apache2.service', 'php7.4-fpm.service', 'php8.5-fpm.service'))
         self.assertEqual(self.m.FLAGS, FLAGS)
         for bad in ('', 'B' * 32, None, ';echo PRIVATE'):
             with self.assertRaises(self.m.Refused): self.m.remote_program(bad)
+
+    def test_shared_candidate_inventory_is_exactly_25_fixed_reviewed_code_files(self):
+        inventory=[list(row) for row in self.m.CODE_FILES]
+        self.assertEqual(len(inventory),25)
+        self.assertEqual(hashlib.sha256(json.dumps(inventory,separators=(',',':')).encode()).hexdigest(),
+            '6dd1439539ab6548d034368c5f267f379cc9856892ac04fa629e0f01fab2a7e7')
+        self.assertEqual(len({row[0] for row in inventory}),25)
+        self.assertEqual(len({row[1] for row in inventory}),25)
+        self.assertEqual(sum(row[1].startswith('/srv/jsm/app/frontend/') for row in inventory),13)
+        self.assertEqual(sum(row[1].startswith('/srv/jsm/app/backend/') for row in inventory),12)
+        self.assertTrue(all(0<row[2]<=65536 for row in inventory))
+        api,_=self.api()
+        with patch.object(self.m,'PIN_SHA256',hashlib.sha256(KNOWN.encode()).hexdigest()), \
+                patch.object(self.m.secrets,'token_hex',return_value=NONCE), \
+                patch.object(self.m,'_bounded',return_value=(0,json.dumps(self.outer(),separators=(',',':')).encode())):
+            result=self.m.collect(api,self.context())
+        self.assertEqual(result['reviewed_candidate_sha'],'8b07cd006859650b35bffee3eda2c5ee07919f1b')
+        self.assertEqual(len(result['code_files']),25)
+        self.assertTrue(all(row['matches_reviewed'] for row in result['code_files']))
+        for mutate in (lambda c:c['code_files'].pop(),lambda c:c['code_files'].append(dict(c['code_files'][0])),
+                       lambda c:c['code_files'][-1].update(id='PRIVATE_UNKNOWN_PATH')):
+            value=self.outer(); mutate(value['root_diagnostic'])
+            projected=self.m.project_remote(json.dumps(value,separators=(',',':')).encode(),NONCE)
+            self.assertTrue(projected['ssh_identity']); self.assertTrue(projected['sudo_root_identity'])
+            self.assertEqual(projected['code_files'],[None]*25)
+            self.assertNotIn('PRIVATE',json.dumps(projected))
+
+    def test_all_25_fixed_code_reads_match_or_report_absent_different_and_oversize_honestly(self):
+        ns=self.library(); body={row[1]:('synthetic-code-'+row[0]).encode() for row in self.m.CODE_FILES}
+        ns['CODE_FILES']=tuple((name,path,len(body[path]),hashlib.sha256(body[path]).hexdigest()) for name,path,_,_ in self.m.CODE_FILES)
+        calls=[]
+        def read(path,deadline):
+            calls.append(path)
+            if path in body: return dict(present=True,regular=True,mode=420,read_state='ok',raw=body[path],identity=(1,2))
+            if path==self.m.CURRENT: return dict(present=True,regular=True,mode=420,read_state='ok',raw=b'{}',identity=(1,2))
+            return dict(present=False,regular=None,mode=None,read_state='absent',raw=None)
+        ns['_read_fixed']=read; ns['_services']=lambda deadline:self.root_receipt()['services']
+        ns['_metadata_fixed']=lambda path,deadline:dict(present=False,regular=None,mode=None,read_state='absent')
+        with patch.object(os,'geteuid',return_value=0): observed=ns['_observe'](NONCE)
+        self.assertEqual(len(observed['code_files']),25); self.assertTrue(all(row['matches_reviewed'] for row in observed['code_files']))
+        self.assertEqual([path for path in calls if path in body],[row[1] for row in self.m.CODE_FILES])
+        ordinary=read; changed={self.m.CODE_FILES[-1][1]:'absent',self.m.CODE_FILES[-2][1]:'different',self.m.CODE_FILES[-3][1]:'too_large'}
+        def adverse(path,deadline):
+            kind=changed.get(path)
+            if kind=='absent': return dict(present=False,regular=None,mode=None,read_state='absent',raw=None)
+            if kind=='too_large': return dict(present=True,regular=True,mode=420,read_state='too_large',raw=None)
+            row=ordinary(path,deadline)
+            if kind=='different': row['raw']=b'different synthetic code'
+            return row
+        ns['_read_fixed']=adverse
+        with patch.object(os,'geteuid',return_value=0): observed=ns['_observe'](NONCE)
+        self.assertIsNone(observed['code_files'][-1]['matches_reviewed'])
+        self.assertIs(observed['code_files'][-1]['present'],False)
+        self.assertIs(observed['code_files'][-2]['matches_reviewed'],False)
+        self.assertEqual(observed['code_files'][-3]['read_state'],'too_large')
+        self.assertIsNone(observed['code_files'][-3]['sha256'])
+        self.assertNotIn('synthetic-code',json.dumps(observed))
 
     def test_reader_bounds_regular_hash_modes_and_absence_without_following_links(self):
         ns = self.library(); read = ns['_read_fixed']
@@ -241,7 +298,7 @@ IncludeOptional /some/other.conf
             self.assertEqual(result['observation_state'], 'PARTIAL'); self.assertNotIn('PRIVATE', json.dumps(result))
         for value in [dict(good, nonce='c'*32), dict(good, principal='root'), dict(good, euid=True), dict(good, extra='PRIVATE')]:
             with self.assertRaises(self.m.Refused): self.m.project_remote(json.dumps(value).encode(), NONCE)
-        for raw in [b'PRIVATE', b'x'*8193, b'\xff', json.dumps(good).replace('"euid": 1001','"euid": 1001, "euid": 1001').encode()]:
+        for raw in [b'PRIVATE', b'x'*16385, b'\xff', json.dumps(good).replace('"euid": 1001','"euid": 1001, "euid": 1001').encode()]:
             with self.assertRaises(self.m.Refused): self.m.project_remote(raw, NONCE)
 
     def test_child_failure_and_wrong_nonce_never_become_false_root_identity(self):
@@ -287,7 +344,7 @@ IncludeOptional /some/other.conf
             self.assertEqual(key.read_bytes(),b'SYNTHETIC_PRIVATE_KEY\n')
             self.assertEqual(key.stat().st_mode&0o777,0o600); self.assertEqual(key.parent.stat().st_mode&0o777,0o700)
             self.assertEqual((key.parent/'known_hosts').read_bytes(),KNOWN.encode())
-            self.assertEqual(limit,8192); self.assertTrue(0<timeout<=15)
+            self.assertEqual(limit,16384); self.assertTrue(0<timeout<=15)
             return 0,json.dumps(self.outer()).encode()
         api,calls=self.api()
         with patch.object(self.m,'PIN_SHA256',hashlib.sha256(KNOWN.encode()).hexdigest()), \
@@ -320,9 +377,9 @@ IncludeOptional /some/other.conf
         for name in ('deployment_record_begin','deployment_record_end'): child[name]['deployed_at']='2026-11-09T11:00:00.999999Z'
         child['deployment_record_stable']=False
         compact=json.dumps(child,separators=(',',':')).encode()+b'\n'
-        self.assertLessEqual(len(compact),6144)
+        self.assertLessEqual(len(compact),12288)
         maximum_outer=self.outer(child); maximum_outer['euid']=4294967295
-        self.assertLessEqual(len(json.dumps(maximum_outer,separators=(',',':')).encode()+b'\n'),8192)
+        self.assertLessEqual(len(json.dumps(maximum_outer,separators=(',',':')).encode()+b'\n'),16384)
         self.assertNotIn('PRIVATE',compact.decode())
         self.assertTrue(all(self.m._code_record(row,ref) is not None for row,ref in zip(child['code_files'],self.m.CODE_FILES)))
         self.assertTrue(all(self.m._site_record(row,ref) is not None for row,ref in zip(child['sites'],self.m.SITE_FILES)))
@@ -332,9 +389,9 @@ IncludeOptional /some/other.conf
         self.assertTrue(all(self.m._service_record(row,name) is not None for row,name in zip(child['services'],self.m.UNITS)))
         for name in ('deployment_record_begin','deployment_record_end'): self.assertIsNotNone(self.m._deployment_projection(child[name]))
         valid=json.dumps(self.outer(),separators=(',',':')).encode()
-        with self.assertRaises(self.m.Refused): self.m.project_remote(valid+b' '*(8193-len(valid)),NONCE)
+        with self.assertRaises(self.m.Refused): self.m.project_remote(valid+b' '*(16385-len(valid)),NONCE)
 
-    def test_observer_reads_exactly_21_paths_and_never_lock_body_or_config_hash(self):
+    def test_observer_reads_exactly_40_paths_and_never_lock_body_or_config_hash(self):
         ns=self.library(); calls=[]; metadata=[]
         def read(path,deadline):
             calls.append(path)
@@ -351,7 +408,7 @@ IncludeOptional /some/other.conf
         expected=[self.m.CURRENT]+[row[1] for row in self.m.CODE_FILES]+[row[1] for row in self.m.SITE_FILES]
         expected += [self.m.DEPLOYER[1]]+[row[1] for row in self.m.BOOTSTRAP_FILES]+[row[1] for row in self.m.CONFIG_FILES]+[self.m.CURRENT]
         self.assertEqual(calls,expected); self.assertEqual(metadata,[self.m.DEPLOY_LOCK])
-        self.assertEqual(len(set(calls+metadata)),21); self.assertTrue(root['deployment_record_stable'])
+        self.assertEqual(len(set(calls+metadata)),40); self.assertTrue(root['deployment_record_stable'])
         self.assertTrue(all(row['matches_reviewed'] is False for row in root['code_files']))
         for row in root['configs']: self.assertNotIn('sha256',row)
         output=json.dumps(root,separators=(',',':'))
@@ -632,7 +689,7 @@ IncludeOptional /some/other.conf
     def test_actual_outer_constant_enforces_child_caps_nonce_and_five_second_budget(self):
         valid=json.dumps(self.root_receipt(),separators=(',',':')).encode()
         result=self.execute_outer(valid); self.assertTrue(result['sudo_root_identity'])
-        for raw,code in [(valid,1),(valid+b' '*(6145-len(valid)),0),(b'PRIVATE_RAW',0),(b'\xff',0),
+        for raw,code in [(valid,1),(valid+b' '*(12289-len(valid)),0),(b'PRIVATE_RAW',0),(b'\xff',0),
                          (valid.replace(b'"euid":0',b'"euid":0,"euid":0'),0)]:
             result=self.execute_outer(raw,code=code)
             self.assertTrue(result['ssh_identity']); self.assertIsNone(result['sudo_root_identity'])
