@@ -60,7 +60,7 @@ class AdminProbeTest(unittest.TestCase):
             self.assertIn('IdentitiesOnly=yes', command)
             identity = pathlib.Path(command[command.index('-i')+1]); paths.append(identity.parent)
             known = pathlib.Path(next(arg.split('=',1)[1] for arg in command if arg.startswith('UserKnownHostsFile=')))
-            self.assertEqual(identity.read_text(), 'short-dummy-admin-key')
+            self.assertEqual(identity.read_text(), 'short-dummy-admin-key\n')
             self.assertEqual(known.read_text(), KNOWN)
             self.assertEqual(identity.stat().st_mode & 0o777, 0o600)
             self.assertEqual(known.stat().st_mode & 0o777, 0o600)
@@ -143,6 +143,29 @@ class AdminProbeTest(unittest.TestCase):
                 with self.assertRaises(self.module.Refused): self.module.collect(api, self.context())
             self.assertTrue(folders)
             self.assertTrue(all(not folder.exists() for folder in folders))
+
+    def test_identity_transport_normalizes_only_crlf_and_final_lf_preserving_body_and_pin(self):
+        for pasted, expected in (
+            ('dummy-key-without-final-lf', 'dummy-key-without-final-lf\n'),
+            ('dummy-key-with-final-lf\n', 'dummy-key-with-final-lf\n'),
+            ('  dummy body line  \r\nsecond line  \r\n\r\n', '  dummy body line  \nsecond line  \n'),
+        ):
+            with self.subTest(pasted=pasted):
+                api, calls = self.api(); env = self.context(); env['APACHE_BOOTSTRAP_ADMIN_SSH_KEY'] = pasted
+                folders = []
+                def transport(command, program):
+                    identity = pathlib.Path(command[command.index('-i')+1]); folders.append(identity.parent)
+                    self.assertEqual(identity.read_bytes(), expected.encode())
+                    self.assertEqual((identity.parent / 'known_hosts').read_bytes(), KNOWN.encode())
+                    self.assertEqual(env['APACHE_BOOTSTRAP_ADMIN_SSH_KEY'], pasted)
+                    return json.dumps(self.payload()).encode()
+                with patch.object(self.module, 'PIN_SHA256', hashlib.sha256(KNOWN.encode()).hexdigest()), \
+                        patch.object(self.module.secrets, 'token_hex', return_value='b' * 32), \
+                        patch.object(self.module, 'bounded_ssh', side_effect=transport):
+                    result = self.module.collect(api, env)
+                self.assertEqual(result['status'], 'ADMIN_READ_ONLY_PROBE_COMPLETE')
+                self.assertTrue(folders)
+                self.assertTrue(all(not folder.exists() for folder in folders))
 
 
 if __name__ == '__main__': unittest.main()

@@ -155,7 +155,9 @@ def collect(api, env):
     with tempfile.TemporaryDirectory(prefix='jsm-admin-ro-') as folder:
         os.chmod(folder, 0o700)
         identity, hosts = Path(folder) / 'identity', Path(folder) / 'known_hosts'
-        private_file(identity, key)
+        # Normalize only transport line endings in this temporary copy; preserve
+        # all body spaces and the owner-provided value. Host-pin bytes stay exact.
+        private_file(identity, key.replace('\r\n', '\n').rstrip('\n') + '\n')
         private_file(hosts, known)
         command = ['ssh', '-F', '/dev/null', '-T', '-i', str(identity), '-p', '17177',
                    '-o', 'IdentitiesOnly=yes', '-o', 'IdentityAgent=none', '-o', 'StrictHostKeyChecking=yes',
