@@ -42,7 +42,7 @@ class InstalledRouteTests(unittest.TestCase):
     def library(self):
         ns = dict(CODE_FILES=self.m.CODE_FILES, SITE_FILES=self.m.SITE_FILES, UNITS=self.m.UNITS,
                   FLAGS=self.m.FLAGS, NONCE=NONCE)
-        for name in ('CONFIG_FILES','BOOTSTRAP_FILES','DEPLOYER','CURRENT','DEPLOY_LOCK','LITERAL_SYMBOLS'):
+        for name in ('CONFIG_FILES','BOOTSTRAP_FILES','DEPLOYER','CURRENT','DEPLOY_LOCK','LITERAL_SYMBOLS','AMAZON_HEALTH','AMAZON_PARAMS','EMPTY_SEARCH_REASON','ERROR_SEARCH_PREFIX'):
             if hasattr(self.m,name): ns[name]=getattr(self.m,name)
         exec(compile(self.m._ROOT_LIBRARY, '<reviewed-diagnostic-library>', 'exec'), ns)
         return ns
@@ -89,6 +89,12 @@ class InstalledRouteTests(unittest.TestCase):
             deployment_record_begin=dict(read_state='ok',sha='a'*40,deployed_at='2026-11-09T11:00:00Z'),
             deployment_record_end=dict(read_state='ok',sha='a'*40,deployed_at='2026-11-09T11:00:00Z'),
             deployment_record_stable=True,deploy_lock=dict(present=True,regular=True,mode=384,read_state='ok'),
+            stored_amazon_search=dict(read_state='ok',parse_state='supported',meaning='STORED_SEARCH_MONITOR_NOT_B0_OR_CURRENT_PROBE',
+                binding='SOURCE_EXPECTED_NOT_ACTIVE_PROVEN',freshness='STORED_TIMESTAMP_ONLY',fails=0,oks=0,down=False,alerted=False,
+                lastAlert=0,since=0,everOk=False,lastProbe=dict(at=0,ok=False,ms=0,reason_class='NONE')),
+            amazon_literal_params=dict(read_state='ok',profile_parse='supported',meaning='LITERAL_PARAMETERS_NOT_EFFECTIVE_CONFIG',
+                proxy_file_nonempty=True,proxy_file_location_kind='ABSOLUTE_PATH_LITERAL',snapshots_literal=False,
+                budget_positive_literal=False,indirection_or_override='UNKNOWN'),
             code_literal_presence=[dict(id=name,read_state='ok',meaning='BYTE_LITERAL_PRESENCE_ONLY',
                 flags={symbol:False for symbol in symbols}) for name,symbols in LITERALS],
             observation_state='OBSERVED')
@@ -106,6 +112,120 @@ class InstalledRouteTests(unittest.TestCase):
         self.assertEqual(self.m.FLAGS, FLAGS)
         for bad in ('', 'B' * 32, None, ';echo PRIVATE'):
             with self.assertRaises(self.m.Refused): self.m.remote_program(bad)
+
+    def test_stored_search_monitor_projects_typed_state_and_never_claims_current_b0_health(self):
+        ns=self.library(); self.assertIn('_stored_search',ns,'stored search projection missing')
+        state=dict(fails=3,oks=0,down=True,alerted=False,lastAlert=0,since=1794230000,everOk=True,
+            lastProbe=dict(at=1794230600,ok=False,ms=123,reason='пустая выдача (заставка проверки или блокировка)'))
+        row=ns['_stored_search'](json.dumps(state,ensure_ascii=False).encode(),'ok')
+        self.assertEqual(row['meaning'],'STORED_SEARCH_MONITOR_NOT_B0_OR_CURRENT_PROBE')
+        self.assertEqual(row['binding'],'SOURCE_EXPECTED_NOT_ACTIVE_PROVEN')
+        self.assertEqual(row['freshness'],'STORED_TIMESTAMP_ONLY')
+        for name in ('fails','oks','down','alerted','lastAlert','since','everOk'): self.assertEqual(row[name],state[name])
+        self.assertEqual(row['lastProbe'],dict(at=1794230600,ok=False,ms=123,reason_class='EMPTY_OR_CHALLENGE'))
+        for raw in (None,b'{}',b'[]',b'PRIVATE_URL',b'{"down":true,"down":false}',b'{"fails":NaN}'):
+            result=ns['_stored_search'](raw,'absent' if raw is None else 'ok')
+            self.assertIsNone(result['down']); self.assertIsNone(result['alerted']); self.assertIsNone(result['lastProbe']['ok'])
+            self.assertNotIn('PRIVATE',json.dumps(result))
+
+    def test_stored_search_reason_classification_and_integer_bounds_never_emit_private_reason_details(self):
+        ns=self.library(); self.assertIn('_stored_search',ns)
+        reasons=[('', 'NONE'),('пустая выдача (заставка проверки или блокировка)','EMPTY_OR_CHALLENGE'),
+                 ('ошибка: PRIVATE https://private.invalid/auth?secret=PRIVATE','ERROR_DETAILS_REDACTED'),
+                 ('PRIVATE https://private.invalid','UNKNOWN_REDACTED'),(None,'UNKNOWN_REDACTED')]
+        for reason,expected in reasons:
+            row=ns['_stored_search'](json.dumps(dict(lastProbe=dict(reason=reason))).encode(),'ok')
+            self.assertEqual(row['lastProbe']['reason_class'],expected)
+            for value in ('PRIVATE','http','ошибка','пустая'): self.assertNotIn(value,json.dumps(row,ensure_ascii=False))
+        raw=json.dumps(dict(fails=True,oks=-1,down=0,alerted='false',lastAlert=-1,since=4294967296,everOk=1,
+            lastProbe=dict(at=True,ok=1,ms=2147483648,reason=''))).encode()
+        row=ns['_stored_search'](raw,'ok')
+        for name in ('fails','oks','down','alerted','lastAlert','since','everOk'): self.assertIsNone(row[name])
+        for name in ('at','ok','ms'): self.assertIsNone(row['lastProbe'][name])
+        row=ns['_stored_search'](b'{"fails":2147483647,"oks":0,"lastAlert":4294967295,"since":0,"lastProbe":{"at":0,"ms":2147483647}}','ok')
+        self.assertEqual(row['fails'],2147483647); self.assertEqual(row['lastProbe']['at'],0)
+
+    def test_amazon_params_are_top_level_literals_only_and_never_access_the_proxy_filename(self):
+        ns=self.library(); self.assertIn('_amazon_params',ns,'fixed Amazon params projection missing')
+        raw=b"<?php return ['amazonProxyFile'=>'/PRIVATE/proxy-credentials.txt','amazonProxyDailyMb'=>800,'amazonSnapshots'=>true,'password'=>'PRIVATE_VALUE'];"
+        with patch.object(os,'open',side_effect=AssertionError('proxy file accessed')),patch.object(os,'stat',side_effect=AssertionError('proxy path inspected')):
+            row=ns['_amazon_params'](raw,'ok')
+        self.assertEqual(row['profile_parse'],'supported'); self.assertIs(row['proxy_file_nonempty'],True)
+        self.assertEqual(row['proxy_file_location_kind'],'ABSOLUTE_PATH_LITERAL')
+        self.assertIs(row['budget_positive_literal'],True); self.assertIs(row['snapshots_literal'],True)
+        self.assertEqual(row['indirection_or_override'],'UNKNOWN')
+        for value in ('PRIVATE','proxy-credentials','800','password','sha256'): self.assertNotIn(value,json.dumps(row))
+        for path,kind,nonempty in [('', 'EMPTY_LITERAL',False),('relative/proxy.txt','RELATIVE_PATH_LITERAL',True),
+                                  ('@runtime/proxy.txt','YII_ALIAS_LITERAL',True),('http://PRIVATE','OTHER_LITERAL',True)]:
+            raw=("<?php return ['amazonProxyFile'=>"+repr(path)+",'amazonProxyDailyMb'=>0,'amazonSnapshots'=>false];").encode()
+            row=ns['_amazon_params'](raw,'ok')
+            self.assertEqual(row['proxy_file_location_kind'],kind); self.assertIs(row['proxy_file_nonempty'],nonempty)
+            self.assertIs(row['budget_positive_literal'],False); self.assertIs(row['snapshots_literal'],False)
+        row=ns['_amazon_params'](b"<?php return ['amazonProxyDailyMb'=>-1];",'ok')
+        self.assertIs(row['budget_positive_literal'],False)
+        for spelling in ('08','09','+08','-09','010'):
+            row=ns['_amazon_params'](("<?php return ['amazonProxyDailyMb'=>"+spelling+"];").encode(),'ok')
+            self.assertIsNone(row['budget_positive_literal'])
+
+    def test_amazon_params_dynamic_duplicates_and_private_string_spoofs_remain_unknown(self):
+        ns=self.library(); self.assertIn('_amazon_params',ns)
+        for raw in [b"<?php return ['amazonProxyFile'=>getenv('PRIVATE'),'amazonProxyDailyMb'=>800+1,'amazonSnapshots'=>defined('PRIVATE')];",
+                    b"<?php return ['password'=>\"amazonProxyFile amazonProxyDailyMb amazonSnapshots\"];"]:
+            row=ns['_amazon_params'](raw,'ok')
+            for name in ('proxy_file_nonempty','budget_positive_literal','snapshots_literal'): self.assertIsNone(row[name])
+            self.assertEqual(row['proxy_file_location_kind'],'UNKNOWN'); self.assertNotIn('PRIVATE',json.dumps(row))
+        for raw in [b"<?php return ['amazonSnapshots'=>true,'amazonSnapshots'=>false];",b"<?php return ['x'=><<<END\nPRIVATE\nEND\n];",
+                    b'<?php return ["unused"=>"{$x["\n,\n\'amazonSnapshots\'=>true,\n\'fake\'=>\n"]}"];',b'x'*65537,b'\xff']:
+            row=ns['_amazon_params'](raw,'ok'); self.assertEqual(row['profile_parse'],'unsupported')
+            self.assertIsNone(row['snapshots_literal']); self.assertNotIn('PRIVATE',json.dumps(row))
+
+    def test_stored_provider_categories_are_closed_and_malformed_data_preserves_valid_scope(self):
+        for mutate in [lambda c:c['stored_amazon_search'].update(extra='PRIVATE'),
+                       lambda c:c['stored_amazon_search']['lastProbe'].update(reason='PRIVATE'),
+                       lambda c:c['stored_amazon_search']['lastProbe'].update(reason_class='PRIVATE'),
+                       lambda c:c['stored_amazon_search'].update(down=0),
+                       lambda c:c['stored_amazon_search'].update(fails=True),
+                       lambda c:c['stored_amazon_search'].update(lastAlert=4294967296),
+                       lambda c:c['stored_amazon_search'].update(meaning='HEALTHY_NOW'),
+                       lambda c:c['amazon_literal_params'].update(proxy_file_location_kind='/PRIVATE/path'),
+                       lambda c:c['amazon_literal_params'].update(proxy_file_nonempty=True,proxy_file_location_kind='EMPTY_LITERAL'),
+                       lambda c:c['amazon_literal_params'].update(indirection_or_override='SAFE'),
+                       lambda c:c['amazon_literal_params'].update(profile_parse='unsupported'),
+                       lambda c:c['amazon_literal_params'].update(raw='PRIVATE')]:
+            value=self.outer(); mutate(value['root_diagnostic'])
+            result=self.m.project_remote(json.dumps(value,separators=(',',':')).encode(),NONCE)
+            self.assertTrue(result['ssh_identity']); self.assertTrue(result['sudo_root_identity'])
+            self.assertTrue(all(row is not None for row in result['code_files']))
+            self.assertEqual(result['observation_state'],'PARTIAL'); self.assertNotIn('PRIVATE',json.dumps(result))
+        value=self.outer(); value['root_diagnostic']['stored_amazon_search']=False
+        result=self.m.project_remote(json.dumps(value,separators=(',',':')).encode(),NONCE)
+        self.assertIsNone(result['stored_amazon_search']); self.assertIsNotNone(result['amazon_literal_params'])
+        self.assertTrue(result['sudo_root_identity'])
+
+    def test_provider_extension_reads_exactly_two_extra_fixed_files_without_private_hashes(self):
+        ns=self.library(); self.assertEqual(self.m.AMAZON_HEALTH,'/srv/jsm/app/backend/console/runtime/amazon-health.json')
+        self.assertEqual(self.m.AMAZON_PARAMS,'/srv/jsm/app/backend/api/config/params-local.php')
+        calls=[]
+        def read(path,deadline):
+            calls.append(path)
+            if path==self.m.AMAZON_HEALTH: raw=b'{"down":true,"lastProbe":{"at":1000,"reason":"PRIVATE https://private.invalid"}}'
+            elif path==self.m.AMAZON_PARAMS: raw=b"<?php return ['amazonProxyFile'=>'/PRIVATE/credentials.txt','amazonProxyDailyMb'=>800,'amazonSnapshots'=>true];"
+            elif path==self.m.CURRENT: raw=b'{}'
+            else: raw=b'<?php return [];'
+            return dict(present=True,regular=True,mode=420,read_state='ok',raw=raw,identity=(1,2))
+        ns['_read_fixed']=read; ns['_services']=lambda deadline:self.root_receipt()['services']
+        ns['_metadata_fixed']=lambda path,deadline:dict(present=False,regular=None,mode=None,read_state='absent')
+        with patch.object(os,'geteuid',return_value=0): observed=ns['_observe'](NONCE)
+        self.assertEqual(calls.count(self.m.AMAZON_HEALTH),1); self.assertEqual(calls.count(self.m.AMAZON_PARAMS),1)
+        expected=[self.m.CURRENT]+[row[1] for row in self.m.CODE_FILES]+[row[1] for row in self.m.SITE_FILES]
+        expected += [self.m.DEPLOYER[1]]+[row[1] for row in self.m.BOOTSTRAP_FILES]+[row[1] for row in self.m.CONFIG_FILES]
+        expected += [self.m.AMAZON_HEALTH,self.m.AMAZON_PARAMS,self.m.CURRENT]
+        self.assertEqual(calls,expected); self.assertEqual(len(set(calls+[self.m.DEPLOY_LOCK])),42)
+        for key in ('stored_amazon_search','amazon_literal_params'):
+            self.assertNotIn('sha256',observed[key]); self.assertNotIn('PRIVATE',json.dumps(observed[key]))
+        result=self.m.project_remote(json.dumps(self.outer(observed),separators=(',',':')).encode(),NONCE)
+        self.assertTrue(result['stored_amazon_search']['down']); self.assertTrue(result['amazon_literal_params']['snapshots_literal'])
+        self.assertNotIn('PRIVATE',json.dumps(result)); self.assertNotIn('private.invalid',json.dumps(result))
 
     def test_static_code_literals_are_closed_byte_presence_even_in_comments_or_quoted_text(self):
         ns=self.library(); self.assertIn('_literal_presence',ns,'fixed static code literal projection is missing')
@@ -176,7 +296,7 @@ class InstalledRouteTests(unittest.TestCase):
         with patch.object(os,'geteuid',return_value=0): observed=ns['_observe'](NONCE)
         for path in (self.m.CODE_FILES[9][1],self.m.CODE_FILES[10][1],self.m.DEPLOYER[1]): self.assertEqual(calls.count(path),1)
         expected=[self.m.CURRENT]+[row[1] for row in self.m.CODE_FILES]+[row[1] for row in self.m.SITE_FILES]
-        expected += [self.m.DEPLOYER[1]]+[row[1] for row in self.m.BOOTSTRAP_FILES]+[row[1] for row in self.m.CONFIG_FILES]+[self.m.CURRENT]
+        expected += [self.m.DEPLOYER[1]]+[row[1] for row in self.m.BOOTSTRAP_FILES]+[row[1] for row in self.m.CONFIG_FILES]+[self.m.AMAZON_HEALTH,self.m.AMAZON_PARAMS,self.m.CURRENT]
         self.assertEqual(calls,expected)
         flags={row['id']:row['flags'] for row in observed['code_literal_presence']}
         self.assertIs(flags['seo_server']['createPublicDataSeo'],True)
@@ -464,6 +584,9 @@ IncludeOptional /some/other.conf
         child['deployer'].update(mode=4095,matches_historical=False)
         child['deploy_lock'].update(regular=False,mode=None,read_state='not_regular')
         for name in ('deployment_record_begin','deployment_record_end'): child[name]['deployed_at']='2026-11-09T11:00:00.999999Z'
+        child['stored_amazon_search'].update(fails=2147483647,oks=2147483647,down=False,alerted=False,
+            lastAlert=4294967295,since=4294967295,everOk=False,
+            lastProbe=dict(at=4294967295,ok=False,ms=2147483647,reason_class='ERROR_DETAILS_REDACTED'))
         child['deployment_record_stable']=False
         compact=json.dumps(child,separators=(',',':')).encode()+b'\n'
         self.assertLessEqual(len(compact),12288)
@@ -477,18 +600,21 @@ IncludeOptional /some/other.conf
         self.assertIsNotNone(self.m._deployer_record(child['deployer'])); self.assertIsNotNone(self.m._lock_projection(child['deploy_lock']))
         self.assertTrue(all(self.m._service_record(row,name) is not None for row,name in zip(child['services'],self.m.UNITS)))
         self.assertTrue(all(self.m._literal_record(row,ref) is not None for row,ref in zip(child['code_literal_presence'],LITERALS)))
+        self.assertIsNotNone(self.m._stored_search_record(child['stored_amazon_search']))
+        self.assertIsNotNone(self.m._amazon_params_record(child['amazon_literal_params']))
         for name in ('deployment_record_begin','deployment_record_end'): self.assertIsNotNone(self.m._deployment_projection(child[name]))
         valid=json.dumps(self.outer(),separators=(',',':')).encode()
         with self.assertRaises(self.m.Refused): self.m.project_remote(valid+b' '*(16385-len(valid)),NONCE)
 
-    def test_observer_reads_exactly_40_paths_and_never_lock_body_or_config_hash(self):
+    def test_observer_reads_exactly_42_paths_and_never_lock_body_or_config_hash(self):
         ns=self.library(); calls=[]; metadata=[]
         def read(path,deadline):
             calls.append(path)
             if path.startswith('/etc/apache2/'): raw=b'ServerName develop.jsmjapan.com\n'
+            elif path==self.m.AMAZON_HEALTH: raw=b'{}'
             elif path==self.m.CURRENT: raw=b'{"sha":"'+b'a'*40+b'","deployed_at":"2026-11-09T11:00:00Z"}'
             elif path.endswith('.env'): raw=b'DB_HOST=localhost\nDB_NAME=test_1568\nPASSWORD=PRIVATE'
-            elif path in [row[1] for row in self.m.CONFIG_FILES]: raw=b'<?php return [];'
+            elif path==self.m.AMAZON_PARAMS or path in [row[1] for row in self.m.CONFIG_FILES]: raw=b'<?php return [];'
             else: raw=b'SYNTHETIC_CODE LEGACY_REFERENCE_ONLY'
             return dict(present=True,regular=True,mode=0o644,read_state='ok',raw=raw,identity=(1,2,3))
         ns['_read_fixed']=read
@@ -496,9 +622,9 @@ IncludeOptional /some/other.conf
         ns['_services']=lambda deadline:self.root_receipt()['services']
         with patch.object(os,'geteuid',return_value=0): root=ns['_observe'](NONCE)
         expected=[self.m.CURRENT]+[row[1] for row in self.m.CODE_FILES]+[row[1] for row in self.m.SITE_FILES]
-        expected += [self.m.DEPLOYER[1]]+[row[1] for row in self.m.BOOTSTRAP_FILES]+[row[1] for row in self.m.CONFIG_FILES]+[self.m.CURRENT]
+        expected += [self.m.DEPLOYER[1]]+[row[1] for row in self.m.BOOTSTRAP_FILES]+[row[1] for row in self.m.CONFIG_FILES]+[self.m.AMAZON_HEALTH,self.m.AMAZON_PARAMS,self.m.CURRENT]
         self.assertEqual(calls,expected); self.assertEqual(metadata,[self.m.DEPLOY_LOCK])
-        self.assertEqual(len(set(calls+metadata)),40); self.assertTrue(root['deployment_record_stable'])
+        self.assertEqual(len(set(calls+metadata)),42); self.assertTrue(root['deployment_record_stable'])
         self.assertTrue(all(row['matches_reviewed'] is False for row in root['code_files']))
         for row in root['configs']: self.assertNotIn('sha256',row)
         output=json.dumps(root,separators=(',',':'))
