@@ -103,6 +103,14 @@ DEPLOYER = ('deployer', '/usr/local/sbin/jsm-sandbox-deploy', '4b0815ff755c6b291
 CURRENT = '/srv/jsm/deploy/current.json'
 DEPLOY_LOCK = '/run/jsm-sandbox-deploy.lock'
 
+# Raw byte presence only: comments, quoted strings and substrings count.
+# These fixed symbols never establish an executed feature or control flow.
+LITERAL_SYMBOLS = (
+    ('seo_server', ('createPublicDataSeo','publicDataSeo','articleSeo','hiddenLanguageRobots','PayPalScriptProvider',
+        'X-Sandbox-Nonce','__JSM_SANDBOX_CONFIG__','SSRSeoBootstrap','res.redirect','__gate')),
+    ('seo_app', ('publicSeoCanonical','publicSeoRoute')),
+    ('deployer', ('config/server.js','src/App.tsx','App.tsx','write_text','replace','__gate')))
+
 # Fixed diagnostic definitions; tests execute these same bytes on synthetic
 # owned fixtures. This library has no entry point, input parser or application import.
 _ROOT_LIBRARY = r'''
@@ -549,14 +557,19 @@ def _services(deadline):
                 try: process.wait(timeout=.05)
                 except subprocess.TimeoutExpired: pass
             process.stdout.close()
+def _literal_presence(name,raw,state):
+    symbols=dict(LITERAL_SYMBOLS)[name]
+    return dict(id=name,read_state=state,meaning='BYTE_LITERAL_PRESENCE_ONLY',
+        flags={symbol:(symbol.encode('ascii') in raw if raw is not None and state=='ok' else None) for symbol in symbols})
 def _observe(nonce):
     deadline=time.monotonic()+3
     begin=_read_fixed(CURRENT,deadline)
-    code=[]; sites=[]; partial=False
+    code=[]; sites=[]; partial=False; literals={}
     for name,path,size,digest in CODE_FILES:
         row=_read_fixed(path,deadline); raw=row.pop('raw'); row.pop('identity',None)
         hashed=hashlib.sha256(raw).hexdigest() if raw is not None else None
         code.append(dict(row,id=name,sha256=hashed,matches_reviewed=(hashed==digest and len(raw)==size) if raw is not None else None))
+        if name in ('seo_server','seo_app'): literals[name]=_literal_presence(name,raw,row['read_state'])
         partial=partial or row['read_state'] not in ('ok','absent','not_regular')
     for name,path in SITE_FILES:
         row=_read_fixed(path,deadline); raw=row.pop('raw'); row.pop('identity',None); row.pop('mode')
@@ -566,6 +579,7 @@ def _observe(nonce):
     row=_read_fixed(DEPLOYER[1],deadline); raw=row.pop('raw'); row.pop('identity',None)
     hashed=hashlib.sha256(raw).hexdigest() if raw is not None else None
     deployer=dict(row,id=DEPLOYER[0],sha256=hashed,matches_historical=(hashed==DEPLOYER[2]) if raw is not None else None)
+    literals[DEPLOYER[0]]=_literal_presence(DEPLOYER[0],raw,row['read_state'])
     partial=partial or row['read_state'] not in ('ok','absent','not_regular')
     bootstrap=[]
     for name,path in BOOTSTRAP_FILES:
@@ -590,6 +604,7 @@ def _observe(nonce):
         or lock['read_state'] not in ('ok','absent','not_regular')
         or any('unknown' in (row['load_state'],row['active_state'],row['sub_state']) for row in services))
     return dict(version='jsm-test-installed-route-v2',nonce=nonce,euid=os.geteuid(),code_files=code,sites=sites,services=services,
+        code_literal_presence=[literals[name] for name,_ in LITERAL_SYMBOLS],
         configs=configs,bootstrap_files=bootstrap,deployer=deployer,deployment_record_begin=first,deployment_record_end=last,
         deployment_record_stable=stable,deploy_lock=lock,observation_state='PARTIAL' if partial else 'OBSERVED')
 '''
@@ -613,7 +628,7 @@ def context_ready(env):
 def remote_program(nonce):
     need(type(nonce) is str and re.fullmatch('[0-9a-f]{32}',nonce), 'NONCE_REQUIRED')
     child = ('CODE_FILES='+repr(CODE_FILES)+'\nSITE_FILES='+repr(SITE_FILES)+'\nUNITS='+repr(UNITS)+'\nFLAGS='+repr(FLAGS)+'\n'
-        + ''.join(name+'='+repr(globals()[name])+'\n' for name in ('CONFIG_FILES','BOOTSTRAP_FILES','DEPLOYER','CURRENT','DEPLOY_LOCK'))
+        + ''.join(name+'='+repr(globals()[name])+'\n' for name in ('CONFIG_FILES','BOOTSTRAP_FILES','DEPLOYER','CURRENT','DEPLOY_LOCK','LITERAL_SYMBOLS'))
         + _ROOT_LIBRARY + '\nprint(json.dumps(_observe('+repr(nonce)+'),separators=(",",":"),sort_keys=True))\n')
     # OS identity is independent from child data. A missing/refused/malformed
     # child remains unknown, not a false root identity.
@@ -767,6 +782,18 @@ def _lock_projection(row):
     return dict(row)
 
 
+def _literal_record(row, reference):
+    if type(row) is not dict or set(row)!={'id','read_state','meaning','flags'}: return None
+    if row['meaning']!='BYTE_LITERAL_PRESENCE_ONLY': return None
+    state=row['read_state']; flags=row['flags']
+    if state not in ('ok','absent','not_regular','unsafe_path','too_large','changed','unreadable','deadline'): return None
+    if type(flags) is not dict or set(flags)!=set(reference[1]): return None
+    if state=='ok':
+        if any(type(value) is not bool for value in flags.values()): return None
+    elif any(value is not None for value in flags.values()): return None
+    return dict(row,flags=dict(flags))
+
+
 def _records(rows, references, validator):
     names=[row if type(row) is str else row[0] for row in references]
     if type(rows) is not list or len(rows)!=len(names): return [None]*len(names)
@@ -786,12 +813,12 @@ def project_remote(raw, nonce):
              and outer['principal']=='marinagurina','REMOTE_IDENTITY_SCHEMA_REJECTED')
     except Exception: raise Refused('REMOTE_IDENTITY_SCHEMA_REJECTED') from None
     result=dict(ssh_identity=True,ssh_principal='marinagurina',ssh_euid=outer['euid'],sudo_root_identity=None,
-                code_files=[None]*25,sites=[None]*3,services=[None]*4,configs=[None]*7,bootstrap_files=[None]*2,deployer=None,
+                code_literal_presence=[None]*3,code_files=[None]*25,sites=[None]*3,services=[None]*4,configs=[None]*7,bootstrap_files=[None]*2,deployer=None,
                 deployment_record_begin=None,deployment_record_end=None,deployment_record_stable=None,deploy_lock=None,observation_state='PARTIAL')
     child=outer['root_diagnostic']
     if not (_identity(child,'jsm-test-installed-route-v2',nonce)
             and set(child)=={'version','nonce','euid','code_files','sites','services','observation_state','configs','bootstrap_files','deployer',
-                'deployment_record_begin','deployment_record_end','deployment_record_stable','deploy_lock'}): return result
+                'deployment_record_begin','deployment_record_end','deployment_record_stable','deploy_lock','code_literal_presence'}): return result
     result['sudo_root_identity']=child['euid']==0
     if child['euid']!=0: return result
     code=_records(child['code_files'],CODE_FILES,_code_record)
@@ -800,15 +827,22 @@ def project_remote(raw, nonce):
     configs=_records(child['configs'],CONFIG_FILES,_config_record)
     bootstrap=_records(child['bootstrap_files'],BOOTSTRAP_FILES,_bootstrap_record)
     deployer=_deployer_record(child['deployer'])
+    literals=_records(child['code_literal_presence'],LITERAL_SYMBOLS,_literal_record)
+    sources={reference[0]:row for reference,row in zip(CODE_FILES,code)}
+    sources[DEPLOYER[0]]=deployer
+    for index,(name,_) in enumerate(LITERAL_SYMBOLS):
+        source=sources[name]; row=literals[index]
+        if source is None or row is None or row['read_state']!=source['read_state']: literals[index]=None
     first,last=_deployment_projection(child['deployment_record_begin']),_deployment_projection(child['deployment_record_end'])
     stable=child['deployment_record_stable']
     if stable is not None and type(stable) is not bool: stable=None
     if first is None or last is None or first['read_state']!='ok' or last['read_state']!='ok': stable=None
     if stable is True and first!=last: stable=None
     lock=_lock_projection(child['deploy_lock'])
-    result.update(code_files=code,sites=sites,services=services,configs=configs,bootstrap_files=bootstrap,deployer=deployer,
+    result.update(code_literal_presence=literals,code_files=code,sites=sites,services=services,configs=configs,bootstrap_files=bootstrap,deployer=deployer,
         deployment_record_begin=first,deployment_record_end=last,deployment_record_stable=stable,deploy_lock=lock)
-    complete=(all(row is not None and row['read_state'] in ('ok','absent','not_regular') for row in code)
+    complete=(all(row is not None for row in literals)
+        and all(row is not None and row['read_state'] in ('ok','absent','not_regular') for row in code)
         and all(row is not None and row['read_state'] in ('ok','absent','not_regular') and row['parse_state']!='unsupported' for row in sites)
         and all(row is not None and 'unknown' not in (row['load_state'],row['active_state'],row['sub_state']) for row in services)
         and all(row is not None and row['read_state'] in ('ok','absent','not_regular') and row['profile_parse']!='unsupported' for row in configs)

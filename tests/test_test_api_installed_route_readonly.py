@@ -26,6 +26,11 @@ KNOWN = '34.104.157.63 ssh-ed25519 SYNTHETIC_HOST_KEY'
 FLAGS = ('test_server_name_literal_present', 'api_alias_literal_present',
          'api_proxy_exclusion_literal_present', 'loopback_front_proxy_literal_present',
          'rewrite_rule_present', 'include_or_conditional_present')
+LITERALS = (
+    ('seo_server', ('createPublicDataSeo','publicDataSeo','articleSeo','hiddenLanguageRobots','PayPalScriptProvider',
+        'X-Sandbox-Nonce','__JSM_SANDBOX_CONFIG__','SSRSeoBootstrap','res.redirect','__gate')),
+    ('seo_app', ('publicSeoCanonical','publicSeoRoute')),
+    ('deployer', ('config/server.js','src/App.tsx','App.tsx','write_text','replace','__gate')))
 
 
 class InstalledRouteTests(unittest.TestCase):
@@ -37,7 +42,7 @@ class InstalledRouteTests(unittest.TestCase):
     def library(self):
         ns = dict(CODE_FILES=self.m.CODE_FILES, SITE_FILES=self.m.SITE_FILES, UNITS=self.m.UNITS,
                   FLAGS=self.m.FLAGS, NONCE=NONCE)
-        for name in ('CONFIG_FILES','BOOTSTRAP_FILES','DEPLOYER','CURRENT','DEPLOY_LOCK'):
+        for name in ('CONFIG_FILES','BOOTSTRAP_FILES','DEPLOYER','CURRENT','DEPLOY_LOCK','LITERAL_SYMBOLS'):
             if hasattr(self.m,name): ns[name]=getattr(self.m,name)
         exec(compile(self.m._ROOT_LIBRARY, '<reviewed-diagnostic-library>', 'exec'), ns)
         return ns
@@ -84,6 +89,8 @@ class InstalledRouteTests(unittest.TestCase):
             deployment_record_begin=dict(read_state='ok',sha='a'*40,deployed_at='2026-11-09T11:00:00Z'),
             deployment_record_end=dict(read_state='ok',sha='a'*40,deployed_at='2026-11-09T11:00:00Z'),
             deployment_record_stable=True,deploy_lock=dict(present=True,regular=True,mode=384,read_state='ok'),
+            code_literal_presence=[dict(id=name,read_state='ok',meaning='BYTE_LITERAL_PRESENCE_ONLY',
+                flags={symbol:False for symbol in symbols}) for name,symbols in LITERALS],
             observation_state='OBSERVED')
 
     def outer(self, child=None):
@@ -99,6 +106,88 @@ class InstalledRouteTests(unittest.TestCase):
         self.assertEqual(self.m.FLAGS, FLAGS)
         for bad in ('', 'B' * 32, None, ';echo PRIVATE'):
             with self.assertRaises(self.m.Refused): self.m.remote_program(bad)
+
+    def test_static_code_literals_are_closed_byte_presence_even_in_comments_or_quoted_text(self):
+        ns=self.library(); self.assertIn('_literal_presence',ns,'fixed static code literal projection is missing')
+        self.assertEqual(self.m.LITERAL_SYMBOLS,LITERALS)
+        for name,symbols in LITERALS:
+            raw=b'// '+b' '.join(symbol.encode() for symbol in symbols)+b'\nconst PRIVATE = "opaque";'
+            row=ns['_literal_presence'](name,raw,'ok')
+            self.assertEqual(row['meaning'],'BYTE_LITERAL_PRESENCE_ONLY')
+            self.assertEqual(row['flags'],{symbol:True for symbol in symbols})
+            row=ns['_literal_presence'](name,b'const PRIVATE = "not executed";','ok')
+            self.assertEqual(row['flags'],{symbol:False for symbol in symbols})
+            for state in ('absent','not_regular','unsafe_path','too_large','changed','unreadable','deadline'):
+                row=ns['_literal_presence'](name,None,state)
+                self.assertEqual(row['flags'],{symbol:None for symbol in symbols})
+                self.assertEqual(row['read_state'],state)
+            row=ns['_literal_presence'](name,('"'+symbols[0]+'"').encode(),'ok')
+            self.assertIs(row['flags'][symbols[0]],True)
+            self.assertNotIn('PRIVATE',json.dumps(row)); self.assertNotIn('control_flow',row)
+
+    def test_app_literal_flags_use_the_reviewed_8b07_source_import_names(self):
+        # Exact import from 8b07cd006859650b35bffee3eda2c5ee07919f1b,
+        # site/frontend/src/App.tsx. No app import or JavaScript evaluation.
+        source_import=b"import { publicSeoCanonical, publicSeoRoute } from '@src/helpers/publicSeoRoutes';\n"
+        observe=self.library()['_literal_presence']
+        for raw in (source_import,b'// '+source_import,b'const opaque = "publicSeoCanonical publicSeoRoute";'):
+            row=observe('seo_app',raw,'ok')
+            self.assertEqual(row['flags'],{'publicSeoCanonical':True,'publicSeoRoute':True})
+            self.assertEqual(row['meaning'],'BYTE_LITERAL_PRESENCE_ONLY')
+        row=observe('seo_app',b'// SSRSeoBootstrap PayPalScriptProvider','ok')
+        self.assertEqual(row['flags'],{'publicSeoCanonical':False,'publicSeoRoute':False})
+
+    def test_static_literal_projection_rejects_unknown_symbols_types_and_claims_without_erasing_identity(self):
+        for mutate in [lambda c:c['code_literal_presence'][0]['flags'].update(PRIVATE='PRIVATE'),
+                       lambda c:c['code_literal_presence'][0]['flags'].update(createPublicDataSeo=1),
+                       lambda c:c['code_literal_presence'][0]['flags'].update(createPublicDataSeo=None),
+                       lambda c:c['code_literal_presence'][0].update(meaning='CONTROL_FLOW_PROVEN'),
+                       lambda c:c['code_literal_presence'][0].update(read_state='changed'),
+                       lambda c:c['code_literal_presence'][0].update(raw='PRIVATE'),
+                       lambda c:c['code_literal_presence'][0].update(id='PRIVATE')]:
+            value=self.outer(); mutate(value['root_diagnostic'])
+            projected=self.m.project_remote(json.dumps(value,separators=(',',':')).encode(),NONCE)
+            self.assertTrue(projected['ssh_identity']); self.assertTrue(projected['sudo_root_identity'])
+            self.assertEqual(projected['observation_state'],'PARTIAL'); self.assertNotIn('PRIVATE',json.dumps(projected))
+            self.assertTrue(all(row is not None for row in projected['code_files']))
+        value=self.outer(); value['root_diagnostic']['code_files'][9].update(read_state='absent',present=False,regular=None,
+            mode=None,sha256=None,matches_reviewed=None)
+        projected=self.m.project_remote(json.dumps(value,separators=(',',':')).encode(),NONCE)
+        self.assertIsNone(projected['code_literal_presence'][0])
+        self.assertTrue(projected['sudo_root_identity'])
+        value=self.outer(); value['root_diagnostic']['deployer'].update(read_state='unreadable',present=None,regular=None,
+            mode=None,sha256=None,matches_historical=None)
+        row=value['root_diagnostic']['code_literal_presence'][2]
+        row.update(read_state='unreadable',flags={symbol:None for symbol in LITERALS[2][1]})
+        projected=self.m.project_remote(json.dumps(value,separators=(',',':')).encode(),NONCE)
+        self.assertIsNotNone(projected['code_literal_presence'][2]); self.assertTrue(projected['sudo_root_identity'])
+
+    def test_literal_observations_reuse_only_the_three_existing_safe_reads(self):
+        ns=self.library(); self.assertIn('_literal_presence',ns); calls=[]
+        bodies={'seo_server':b'/* createPublicDataSeo __gate */', 'seo_app':b'"publicSeoCanonical" /* PRIVATE_BODY_APP */',
+                'deployer':b'# config/server.js src/App.tsx write_text replace __gate'}
+        paths={row[1]:row[0] for row in self.m.CODE_FILES}; paths[self.m.DEPLOYER[1]]='deployer'
+        def read(path,deadline):
+            calls.append(path); raw=bodies.get(paths.get(path),b'<?php return [];')
+            if path==self.m.CURRENT: raw=b'{}'
+            return dict(present=True,regular=True,mode=420,read_state='ok',raw=raw,identity=(1,2))
+        ns['_read_fixed']=read; ns['_services']=lambda deadline:self.root_receipt()['services']
+        ns['_metadata_fixed']=lambda path,deadline:dict(present=False,regular=None,mode=None,read_state='absent')
+        with patch.object(os,'geteuid',return_value=0): observed=ns['_observe'](NONCE)
+        for path in (self.m.CODE_FILES[9][1],self.m.CODE_FILES[10][1],self.m.DEPLOYER[1]): self.assertEqual(calls.count(path),1)
+        expected=[self.m.CURRENT]+[row[1] for row in self.m.CODE_FILES]+[row[1] for row in self.m.SITE_FILES]
+        expected += [self.m.DEPLOYER[1]]+[row[1] for row in self.m.BOOTSTRAP_FILES]+[row[1] for row in self.m.CONFIG_FILES]+[self.m.CURRENT]
+        self.assertEqual(calls,expected)
+        flags={row['id']:row['flags'] for row in observed['code_literal_presence']}
+        self.assertIs(flags['seo_server']['createPublicDataSeo'],True)
+        self.assertIs(flags['seo_server']['SSRSeoBootstrap'],False)
+        self.assertIs(flags['seo_app']['publicSeoCanonical'],True)
+        self.assertIs(flags['seo_app']['publicSeoRoute'],False)
+        self.assertIs(flags['deployer']['src/App.tsx'],True)
+        self.assertIs(flags['deployer']['App.tsx'],True) # byte substring, not a separate parsed operand
+        projected=self.m.project_remote(json.dumps(self.outer(observed),separators=(',',':')).encode(),NONCE)
+        self.assertEqual(projected['code_literal_presence'],observed['code_literal_presence'])
+        for value in ('/*','PRIVATE_BODY_APP','# config/server.js','<?php'): self.assertNotIn(value,json.dumps(projected))
 
     def test_shared_candidate_inventory_is_exactly_25_fixed_reviewed_code_files(self):
         inventory=[list(row) for row in self.m.CODE_FILES]
@@ -387,6 +476,7 @@ IncludeOptional /some/other.conf
         self.assertTrue(all(self.m._bootstrap_record(row,ref) is not None for row,ref in zip(child['bootstrap_files'],self.m.BOOTSTRAP_FILES)))
         self.assertIsNotNone(self.m._deployer_record(child['deployer'])); self.assertIsNotNone(self.m._lock_projection(child['deploy_lock']))
         self.assertTrue(all(self.m._service_record(row,name) is not None for row,name in zip(child['services'],self.m.UNITS)))
+        self.assertTrue(all(self.m._literal_record(row,ref) is not None for row,ref in zip(child['code_literal_presence'],LITERALS)))
         for name in ('deployment_record_begin','deployment_record_end'): self.assertIsNotNone(self.m._deployment_projection(child[name]))
         valid=json.dumps(self.outer(),separators=(',',':')).encode()
         with self.assertRaises(self.m.Refused): self.m.project_remote(valid+b' '*(16385-len(valid)),NONCE)
