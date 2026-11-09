@@ -108,7 +108,7 @@ DEPLOY_LOCK = '/run/jsm-sandbox-deploy.lock'
 LITERAL_SYMBOLS = (
     ('seo_server', ('createPublicDataSeo','publicDataSeo','articleSeo','hiddenLanguageRobots','PayPalScriptProvider',
         'X-Sandbox-Nonce','__JSM_SANDBOX_CONFIG__','SSRSeoBootstrap','res.redirect','__gate')),
-    ('seo_app', ('SSRSeoBootstrap','PayPalScriptProvider')),
+    ('seo_app', ('publicSeoCanonical','publicSeoRoute')),
     ('deployer', ('config/server.js','src/App.tsx','App.tsx','write_text','replace','__gate')))
 
 # Fixed diagnostic definitions; tests execute these same bytes on synthetic

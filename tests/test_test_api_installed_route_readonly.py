@@ -29,7 +29,7 @@ FLAGS = ('test_server_name_literal_present', 'api_alias_literal_present',
 LITERALS = (
     ('seo_server', ('createPublicDataSeo','publicDataSeo','articleSeo','hiddenLanguageRobots','PayPalScriptProvider',
         'X-Sandbox-Nonce','__JSM_SANDBOX_CONFIG__','SSRSeoBootstrap','res.redirect','__gate')),
-    ('seo_app', ('SSRSeoBootstrap','PayPalScriptProvider')),
+    ('seo_app', ('publicSeoCanonical','publicSeoRoute')),
     ('deployer', ('config/server.js','src/App.tsx','App.tsx','write_text','replace','__gate')))
 
 
@@ -125,6 +125,18 @@ class InstalledRouteTests(unittest.TestCase):
             self.assertIs(row['flags'][symbols[0]],True)
             self.assertNotIn('PRIVATE',json.dumps(row)); self.assertNotIn('control_flow',row)
 
+    def test_app_literal_flags_use_the_reviewed_8b07_source_import_names(self):
+        # Exact import from 8b07cd006859650b35bffee3eda2c5ee07919f1b,
+        # site/frontend/src/App.tsx. No app import or JavaScript evaluation.
+        source_import=b"import { publicSeoCanonical, publicSeoRoute } from '@src/helpers/publicSeoRoutes';\n"
+        observe=self.library()['_literal_presence']
+        for raw in (source_import,b'// '+source_import,b'const opaque = "publicSeoCanonical publicSeoRoute";'):
+            row=observe('seo_app',raw,'ok')
+            self.assertEqual(row['flags'],{'publicSeoCanonical':True,'publicSeoRoute':True})
+            self.assertEqual(row['meaning'],'BYTE_LITERAL_PRESENCE_ONLY')
+        row=observe('seo_app',b'// SSRSeoBootstrap PayPalScriptProvider','ok')
+        self.assertEqual(row['flags'],{'publicSeoCanonical':False,'publicSeoRoute':False})
+
     def test_static_literal_projection_rejects_unknown_symbols_types_and_claims_without_erasing_identity(self):
         for mutate in [lambda c:c['code_literal_presence'][0]['flags'].update(PRIVATE='PRIVATE'),
                        lambda c:c['code_literal_presence'][0]['flags'].update(createPublicDataSeo=1),
@@ -152,7 +164,7 @@ class InstalledRouteTests(unittest.TestCase):
 
     def test_literal_observations_reuse_only_the_three_existing_safe_reads(self):
         ns=self.library(); self.assertIn('_literal_presence',ns); calls=[]
-        bodies={'seo_server':b'/* createPublicDataSeo __gate */', 'seo_app':b'"SSRSeoBootstrap" /* PRIVATE_BODY_APP */',
+        bodies={'seo_server':b'/* createPublicDataSeo __gate */', 'seo_app':b'"publicSeoCanonical" /* PRIVATE_BODY_APP */',
                 'deployer':b'# config/server.js src/App.tsx write_text replace __gate'}
         paths={row[1]:row[0] for row in self.m.CODE_FILES}; paths[self.m.DEPLOYER[1]]='deployer'
         def read(path,deadline):
@@ -169,8 +181,8 @@ class InstalledRouteTests(unittest.TestCase):
         flags={row['id']:row['flags'] for row in observed['code_literal_presence']}
         self.assertIs(flags['seo_server']['createPublicDataSeo'],True)
         self.assertIs(flags['seo_server']['SSRSeoBootstrap'],False)
-        self.assertIs(flags['seo_app']['SSRSeoBootstrap'],True)
-        self.assertIs(flags['seo_app']['PayPalScriptProvider'],False)
+        self.assertIs(flags['seo_app']['publicSeoCanonical'],True)
+        self.assertIs(flags['seo_app']['publicSeoRoute'],False)
         self.assertIs(flags['deployer']['src/App.tsx'],True)
         self.assertIs(flags['deployer']['App.tsx'],True) # byte substring, not a separate parsed operand
         projected=self.m.project_remote(json.dumps(self.outer(observed),separators=(',',':')).encode(),NONCE)
