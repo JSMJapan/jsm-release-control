@@ -5,6 +5,7 @@ in this public repository. The optional local test copies reviewed helper Git
 objects only into an owned temporary Git fixture and never claims live admission.
 """
 import copy
+import ast
 import contextlib
 import hashlib
 import importlib.util
@@ -521,6 +522,13 @@ class PrivateHelperIntegration(unittest.TestCase):
             self.assertEqual('EXACT_SOURCE_REBUILD_VERIFIED_NOT_INSTALLED', verified['status'])
             self.assertEqual(bridge.CONTROL_REPO, verified['control_repository'])
             self.assertEqual(bridge.SOURCE_REPO, verified['source_repository'])
+            # The pure capsule must accept the actual unchanged helpers' output,
+            # without executing any archived code or exposing private bytes.
+            capsule = bridge.build_bootstrap_probe_capsule(p, archive.read_bytes(), '9' * 32)
+            contents = bridge.open_bootstrap_probe_capsule(capsule, p, '9' * 32)
+            self.assertEqual({path.name for path in pack.iterdir()}, set(contents.members))
+            for path in pack.iterdir():
+                self.assertTrue(contents.members[path.name] == path.read_bytes(), 'private member differs')
             self.assertEqual({'version': 'jsm-apache-parity-v1', 'operation': 'inspect', 'resource': 'hostinger:srv1687281',
                               'domain': 'jsmjapan.com', 'pr': '1905', 'source_sha': sha,
                               'bundle_sha256': p['bundle_sha256'], 'payload_sha256': p['payload_sha256'],
@@ -559,6 +567,243 @@ class PrivateHelperIntegration(unittest.TestCase):
             with self.assertRaisesRegex(bridge.Refused, 'PACK_ARCHIVE_'):
                 bridge.verify_private_pack(p, repo, archive, metadata=data)
             self.assertFalse(list(repo.rglob('__pycache__')))
+
+
+def synthetic_activation():
+    """Public inert bytes only; no private application/helper fixture."""
+    p = pins()
+    p['binding_sha256'] = None
+    names = ('activate.py', 'controller.py', 'protocol.py', 'namespace_check.py', 'install.sh',
+             'conditions.conf', 'binding.example.json', 'manifest.json', 'source-evidence.json')
+    members = {name: ('public inert synthetic member: ' + name + '\n').encode() for name in names}
+    p['payload_sha256'] = hashlib.sha256(members['conditions.conf']).hexdigest()
+    module_hashes = {name: hashlib.sha256(members[name]).hexdigest()
+                     for name in ('protocol.py', 'controller.py', 'namespace_check.py', 'conditions.conf')}
+    p['bundle_sha256'] = hashlib.sha256(json.dumps(module_hashes, sort_keys=True,
+                                                 separators=(',', ':')).encode()).hexdigest()
+    members['manifest.json'] = json.dumps(dict(version=1, source_sha=p['source_merge_sha'],
+                                              bundle_sha256=p['bundle_sha256'], payload_sha256=p['payload_sha256']),
+                                         sort_keys=True).encode() + b'\n'
+    for name in ('activate.py', 'controller.py', 'protocol.py', 'namespace_check.py'):
+        p['executable_sha256'][name] = hashlib.sha256(members[name]).hexdigest()
+    inventory = dict(version=1, resource=p['resource'], domain=p['domain'],
+                     controller_source_sha=p['source_merge_sha'], builder_source_sha=p['builder_sha'],
+                     bundle_sha256=p['bundle_sha256'], payload_sha256=p['payload_sha256'],
+                     files={name: hashlib.sha256(raw).hexdigest() for name, raw in members.items()})
+    members['activation-manifest.json'] = json.dumps(inventory, sort_keys=True, separators=(',', ':')).encode() + b'\n'
+    p['inventory_sha256'] = hashlib.sha256(members['activation-manifest.json']).hexdigest()
+    return p, members
+
+
+def synthetic_archive(members, *, change=None, extra=None, root=True, format=tarfile.USTAR_FORMAT):
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode='w', format=format) as bundle:
+        if root:
+            entry = tarfile.TarInfo('./')
+            entry.type, entry.mode, entry.uid, entry.gid = tarfile.DIRTYPE, 0o700, 0, 0
+            bundle.addfile(entry)
+        for name, raw in members.items():
+            entry = tarfile.TarInfo('./' + name)
+            entry.size, entry.mode, entry.uid, entry.gid = len(raw), 0o600, 0, 0
+            if change is not None:
+                change(entry)
+            bundle.addfile(entry, io.BytesIO(raw) if entry.isfile() else None)
+        if extra is not None:
+            bundle.addfile(extra, io.BytesIO(b'x' * extra.size) if extra.isfile() else None)
+    return output.getvalue()
+
+
+def synthetic_probe(p):
+    binding = dict(version=1, resource=p['resource'], domain=p['domain'],
+                   target='/etc/apache2/sites-available/synthetic.conf',
+                   active_alias='/etc/apache2/sites-enabled/synthetic.conf',
+                   alias_target='../sites-available/synthetic.conf', legacy_context_sha256='4' * 64,
+                   deploy_enabled=False)
+    raw = json.dumps(binding, sort_keys=True, separators=(',', ':')).encode()
+    return dict(status='PROBED_NOT_INSTALLED', binding=binding,
+                binding_sha256=hashlib.sha256(raw).hexdigest(), before_sha256='5' * 64,
+                after_sha256='6' * 64, context_sha256='7' * 64, authorized_keys_sha256='8' * 64,
+                controller_source_sha=p['source_merge_sha'], bundle_sha256=p['bundle_sha256'],
+                payload_sha256=p['payload_sha256'], namespace_configtest='PASS', deploy_enabled=False)
+
+
+class BootstrapBytesTests(unittest.TestCase):
+    def setUp(self):
+        self.assertTrue(hasattr(bridge, 'build_bootstrap_probe_capsule'), 'Missing pure probe capsule builder')
+        self.assertTrue(hasattr(bridge, 'open_bootstrap_probe_capsule'), 'Missing strict pure capsule decoder')
+        self.assertTrue(hasattr(bridge, 'project_bootstrap_probe_receipt'), 'Missing closed probe receipt validator')
+        self.p, self.members = synthetic_activation()
+        self.archive = synthetic_archive(self.members)
+        self.p['archive_sha256'] = hashlib.sha256(self.archive).hexdigest()
+        self.nonce = '9' * 32
+
+    def capsule(self, archive=None, p=None):
+        return bridge.build_bootstrap_probe_capsule(p or self.p, self.archive if archive is None else archive, self.nonce)
+
+    def project(self, receipt=None, *, p=None, expected=None, raw=None):
+        if raw is None:
+            raw = json.dumps(dict(version='jsm-apache-bootstrap-probe-receipt-v1', nonce=self.nonce,
+                                  receipt=receipt or synthetic_probe(self.p))).encode()
+        return bridge.project_bootstrap_probe_receipt(raw, p or self.p, self.nonce, expected_probe_pins=expected)
+
+    def test_gnu_ustar_dot_root_and_members_roundtrip_as_data_without_execution(self):
+        # The inert .py members are deliberately invalid Python: decoding must not import them.
+        capsule = self.capsule()
+        contents = bridge.open_bootstrap_probe_capsule(capsule, self.p, self.nonce)
+        self.assertEqual(self.members, contents.members)
+        self.assertNotIn('public inert synthetic member', repr(capsule))
+        self.assertNotIn('public inert synthetic member', repr(contents))
+        self.assertEqual(self.p['archive_sha256'], capsule.projection()['archive_sha256'])
+        with self.assertRaises(TypeError):
+            json.dumps(capsule)
+        plain = synthetic_archive(self.members, root=False)
+        p = dict(self.p, archive_sha256=hashlib.sha256(plain).hexdigest())
+        self.assertEqual(self.members, bridge.open_bootstrap_probe_capsule(self.capsule(plain, p), p, self.nonce).members)
+
+    def test_archive_digest_inventory_byte_and_executable_drift_refuse(self):
+        with self.assertRaises(bridge.Refused):
+            self.capsule(self.archive + b'changed')
+        for name in ('install.sh', 'activate.py', 'activation-manifest.json'):
+            changed = dict(self.members)
+            changed[name] += b'changed'
+            archive = synthetic_archive(changed)
+            p = dict(self.p, archive_sha256=hashlib.sha256(archive).hexdigest())
+            with self.subTest(name=name), self.assertRaises(bridge.Refused):
+                self.capsule(archive, p)
+        p = copy.deepcopy(self.p)
+        p['executable_sha256']['controller.py'] = '0' * 64
+        with self.assertRaises(bridge.Refused):
+            self.capsule(p=p)
+
+    def test_archive_unsafe_names_types_modes_owners_and_normalized_duplicates_refuse(self):
+        mutations = [lambda e: setattr(e, 'name', '../' + e.name) if e.name.endswith('install.sh') else None,
+                     lambda e: setattr(e, 'name', '/install.sh') if e.name.endswith('install.sh') else None,
+                     lambda e: setattr(e, 'mode', 0o644), lambda e: setattr(e, 'uid', 1),
+                     lambda e: setattr(e, 'gid', 1)]
+        for kind in (tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.CHRTYPE, tarfile.FIFOTYPE):
+            def typed(e, kind=kind):
+                if e.name.endswith('install.sh'):
+                    e.type, e.linkname, e.size = kind, 'controller.py', 0
+            mutations.append(typed)
+        duplicate = tarfile.TarInfo('install.sh')
+        duplicate.mode, duplicate.size = 0o600, len(self.members['install.sh'])
+        for index, archive in enumerate([synthetic_archive(self.members, change=fn) for fn in mutations] +
+                                        [synthetic_archive(self.members, extra=duplicate)]):
+            p = dict(self.p, archive_sha256=hashlib.sha256(archive).hexdigest())
+            with self.subTest(index=index), self.assertRaises(bridge.Refused):
+                self.capsule(archive, p)
+
+    def test_pax_extensions_missing_extra_members_trailing_payload_and_size_refuse(self):
+        def pax(e): e.pax_headers = {'comment': 'unapproved extension'}
+        extra = tarfile.TarInfo('unexpected')
+        extra.mode = 0o600
+        missing = dict(self.members)
+        del missing['source-evidence.json']
+        archives = [synthetic_archive(self.members, change=pax, format=tarfile.PAX_FORMAT),
+                    synthetic_archive(missing), synthetic_archive(self.members, extra=extra),
+                    self.archive + b'x' * 512, self.archive[:512], b'x' * (2 * 1024 * 1024 + 1)]
+        for index, archive in enumerate(archives):
+            p = dict(self.p, archive_sha256=hashlib.sha256(archive).hexdigest())
+            with self.subTest(index=index), self.assertRaises(bridge.Refused):
+                self.capsule(archive, p)
+
+    def test_unresolved_real_pins_and_invalid_nonce_refuse_without_side_effects(self):
+        actual = json.loads((ROOT / 'scripts/apache_parity_binding.json').read_text())
+        with self.assertRaisesRegex(bridge.Refused, 'PINS_UNRESOLVED'):
+            self.capsule(p=actual)
+        for nonce in ('', '0' * 31, 'g' * 32, '0' * 32 + '\n'):
+            with self.subTest(nonce=nonce), self.assertRaises(bridge.Refused):
+                bridge.build_bootstrap_probe_capsule(self.p, self.archive, nonce)
+
+    def test_capsule_truncation_extra_bytes_wrong_nonce_and_header_pin_drift_refuse(self):
+        capsule = bytes(self.capsule())
+        for bad in (capsule[:-1], capsule + b'x', capsule.replace(b'"operation":"probe"', b'"operation":"write"'),
+                    capsule.replace(b'"nonce":"' + self.nonce.encode(), b'"nonce":"' + b'0' * 32)):
+            with self.assertRaises(bridge.Refused):
+                bridge.open_bootstrap_probe_capsule(bad, self.p, self.nonce)
+
+    def test_complete_probe_receipt_returns_only_original_closed_not_installed_data(self):
+        receipt = synthetic_probe(self.p)
+        self.assertEqual(receipt, self.project(receipt))
+        expected = {name: receipt[name] for name in ('binding_sha256', 'context_sha256', 'authorized_keys_sha256')}
+        self.assertEqual(receipt, self.project(receipt, expected=expected))
+        expected['authorized_keys_sha256'] = '0' * 64
+        with self.assertRaises(bridge.Refused):
+            self.project(receipt, expected=expected)
+
+    def test_probe_field_pin_binding_hash_and_deploy_enabled_drift_refuse(self):
+        receipt = synthetic_probe(self.p)
+        for name in receipt:
+            bad = copy.deepcopy(receipt)
+            del bad[name]
+            with self.subTest(missing=name), self.assertRaises(bridge.Refused):
+                self.project(bad)
+        for name, value in [('status', 'CONTROLLER_INSTALLED_DEPLOY_DISABLED'), ('extra', 'hidden'),
+                            ('binding_sha256', '0' * 64), ('context_sha256', '-'),
+                            ('authorized_keys_sha256', True), ('controller_source_sha', '0' * 40),
+                            ('bundle_sha256', '0' * 64), ('payload_sha256', '0' * 64),
+                            ('namespace_configtest', 'NOT_RUN'), ('deploy_enabled', True)]:
+            bad = dict(receipt, **{name: value})
+            with self.subTest(field=name), self.assertRaises(bridge.Refused):
+                self.project(bad)
+        for field, value in [('deploy_enabled', True), ('target', '/tmp/foreign'), ('version', True),
+                             ('alias_target', '../../tmp/foreign'), ('extra', 'hidden')]:
+            bad = copy.deepcopy(receipt)
+            bad['binding'][field] = value
+            bad['binding_sha256'] = hashlib.sha256(json.dumps(bad['binding'], sort_keys=True,
+                                                             separators=(',', ':')).encode()).hexdigest()
+            with self.subTest(binding=field), self.assertRaises(bridge.Refused):
+                self.project(bad)
+        with self.assertRaises(bridge.Refused):
+            self.project(receipt, p=dict(self.p, binding_sha256='0' * 64))
+
+    def test_probe_duplicate_unknown_partial_wrong_nonce_and_oversize_output_refuse(self):
+        good = json.dumps(dict(version='jsm-apache-bootstrap-probe-receipt-v1', nonce=self.nonce,
+                               receipt=synthetic_probe(self.p))).encode()
+        raws = [good[:-1], good + b'{}', good.replace(b'"nonce":', b'"unknown":0,"nonce":'),
+                good.replace(b'"nonce":', b'"nonce":"' + self.nonce.encode() + b'","nonce":'),
+                good.replace(self.nonce.encode(), b'0' * 32), b'x' * 8193,
+                good.replace(b'"context_sha256":', b'"context_sha256":"' + b'7' * 64 + b'","context_sha256":')]
+        for index, raw in enumerate(raws):
+            with self.subTest(index=index), self.assertRaises(bridge.Refused):
+                self.project(raw=raw)
+
+    def test_nested_json_is_a_fixed_refusal_not_an_unbounded_parser_exception(self):
+        nested = b'[' * 1500 + b'0' + b']' * 1500
+        with self.assertRaises(bridge.Refused):
+            self.project(raw=nested)
+
+    def test_binding_accepts_exact_relative_or_absolute_target_but_not_other_scope(self):
+        for alias in ('../sites-available/synthetic.conf', '/etc/apache2/sites-available/synthetic.conf'):
+            receipt = synthetic_probe(self.p)
+            receipt['binding']['alias_target'] = alias
+            receipt['binding_sha256'] = hashlib.sha256(json.dumps(receipt['binding'], sort_keys=True,
+                                                                 separators=(',', ':')).encode()).hexdigest()
+            self.assertEqual(alias, self.project(receipt)['binding']['alias_target'])
+        for target in ('/etc/apache2/sites-available/../other.conf', '/etc/apache2/sites-available/nested/file',
+                       '/etc/apache2/sites-available/bad\nfile'):
+            receipt = synthetic_probe(self.p)
+            receipt['binding']['target'] = target
+            receipt['binding_sha256'] = hashlib.sha256(json.dumps(receipt['binding'], sort_keys=True,
+                                                                 separators=(',', ':')).encode()).hexdigest()
+            with self.subTest(target=target), self.assertRaises(bridge.Refused):
+                self.project(receipt)
+
+    @unittest.skipUnless(os.environ.get('JSM_APACHE_REVIEW_ROOT'), 'NOT_RUN: explicit clean private review checkout required')
+    def test_receipt_and_member_schema_match_actual_unchanged_private_contract_without_execution(self):
+        private = Path(os.environ['JSM_APACHE_REVIEW_ROOT']).resolve()
+        frozen = '45f8cc9c264f86c008cf4cd352c1ff5d2a12ca47'
+        self.assertEqual(frozen, git(private, 'rev-parse', 'HEAD'))
+        self.assertEqual('', git(private, 'status', '--porcelain', '--untracked-files=all'))
+        raw = subprocess.check_output(['git', '-C', str(private), 'cat-file', 'blob',
+                                       frozen + ':infra/apache-parity/activate.py'])
+        tree = ast.parse(raw)
+        probe = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'probe')
+        receipt = next(node.value for node in ast.walk(probe) if isinstance(node, ast.Return))
+        self.assertEqual(set(synthetic_probe(self.p)), {item.arg for item in receipt.keywords})
+        files = next(node.value for node in tree.body if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == 'FILES' for target in node.targets))
+        self.assertEqual(set(self.members) - {'activation-manifest.json'}, ast.literal_eval(files))
 
 
 if __name__ == '__main__':

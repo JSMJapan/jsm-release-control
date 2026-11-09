@@ -14,14 +14,17 @@ import http.client
 import json
 import os
 from pathlib import Path
+import posixpath
 import re
 import selectors
 import signal
 import ssl
 import stat
 import subprocess
+import tarfile
 import tempfile
 import time
+from dataclasses import dataclass, field
 
 from hostinger_preflight import Refused, policy_ready
 
@@ -473,3 +476,215 @@ def prepare_request(operation, pins, source_checkout, metadata):
         expected[name] = metadata.get('request', {}).get(name, '-')
     need(result == expected, 'PRIVATE_REQUEST_RECEIPT_PIN_MISMATCH')
     return expected
+
+
+# Pure bytes only: no transport, extraction, process execution or live CLI.
+# A capsule is NOT evidence of source admission. Future protected orchestration
+# must first repeat collect_source_metadata + genuine verify_private_pack. The
+# four source-only helpers absent from the pack remain that verifier's duty.
+_PROBE_MAGIC = b'JSM_APACHE_PROBE_V1\n'
+_PROBE_FILES = frozenset(('activate.py', 'controller.py', 'protocol.py', 'namespace_check.py', 'install.sh',
+                         'conditions.conf', 'binding.example.json', 'manifest.json', 'source-evidence.json'))
+_PROBE_EXECUTABLES = frozenset(('activate.py', 'controller.py', 'protocol.py', 'namespace_check.py'))
+_PROBE_PIN_NAMES = ('source_merge_sha', 'builder_sha', 'archive_sha256', 'inventory_sha256',
+                    'bundle_sha256', 'payload_sha256')
+_PROBE_RECEIPT_FIELDS = frozenset(('status', 'binding', 'binding_sha256', 'before_sha256', 'after_sha256',
+                                  'context_sha256', 'authorized_keys_sha256', 'controller_source_sha',
+                                  'bundle_sha256', 'payload_sha256', 'namespace_configtest', 'deploy_enabled'))
+
+
+@dataclass(frozen=True)
+class BootstrapProbeCapsule:
+    """Private transport bytes; repr/JSON cannot accidentally expose the pack.
+
+    bytes(capsule) is an explicit private-data boundary, never a public output.
+    Only projection() is suitable for a public log or artifact.
+    """
+    _payload: bytes = field(repr=False)
+    _header: bytes = field(repr=False)
+
+    def __bytes__(self):
+        return self._payload
+
+    def projection(self):
+        return strict_json(self._header.decode('ascii'))
+
+
+@dataclass(frozen=True)
+class BootstrapProbeContents:
+    """Internal private member bytes, deliberately absent from repr/JSON."""
+    members: dict = field(repr=False)
+
+
+def _probe_canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode('ascii')
+
+
+def _probe_nonce(nonce):
+    need(type(nonce) is str and re.fullmatch('[0-9a-f]{32}', nonce), 'BOOTSTRAP_NONCE_REQUIRED')
+
+
+def _probe_archive_members(raw, pins):
+    """Parse only bounded ustar records as data; tarfile never extracts/imports.
+
+    Inspect every physical header: tarfile's normal iterator hides PAX/GNU
+    extension records. Authentic GNU ustar ./ and ./name are accepted explicitly.
+    """
+    need(type(raw) is bytes and 1024 <= len(raw) <= MAX_ARCHIVE and len(raw) % 512 == 0,
+         'BOOTSTRAP_ARCHIVE_SIZE')
+    need(hashlib.sha256(raw).hexdigest() == pins['archive_sha256'], 'ARCHIVE_PIN_MISMATCH')
+    members, offset, root_seen = {}, 0, False
+    try:
+        while offset + 512 <= len(raw):
+            header = raw[offset:offset + 512]
+            if header == b'\0' * 512:
+                need(len(raw) - offset >= 1024 and not any(raw[offset:]), 'BOOTSTRAP_ARCHIVE_TERMINATOR')
+                break
+            need(header[257:265] == b'ustar\x0000' and not any(header[345:500]), 'BOOTSTRAP_USTAR_REQUIRED')
+            item = tarfile.TarInfo.frombuf(header, 'utf-8', 'strict')
+            need(item.uid == 0 and item.gid == 0 and not item.linkname, 'BOOTSTRAP_MEMBER_METADATA')
+            offset += 512
+            if item.name in ('.', './'):
+                need(not root_seen and item.type == tarfile.DIRTYPE and item.mode == 0o700 and item.size == 0,
+                     'BOOTSTRAP_ROOT_RECORD')
+                root_seen = True
+                continue
+            name = item.name[2:] if item.name.startswith('./') else item.name
+            need(name in _PROBE_FILES | {'activation-manifest.json'} and name not in members
+                 and item.type in (tarfile.REGTYPE, tarfile.AREGTYPE) and item.mode == 0o600
+                 and 0 <= item.size <= MAX_ARCHIVE, 'BOOTSTRAP_MEMBER_REFUSED')
+            padded = ((item.size + 511) // 512) * 512
+            need(offset + padded <= len(raw) and not any(raw[offset + item.size:offset + padded]),
+                 'BOOTSTRAP_MEMBER_TRUNCATED')
+            members[name] = raw[offset:offset + item.size]
+            offset += padded
+        else:
+            raise Refused('BOOTSTRAP_ARCHIVE_TERMINATOR')
+        need(set(members) == _PROBE_FILES | {'activation-manifest.json'}, 'BOOTSTRAP_MEMBER_INVENTORY')
+        inventory_raw = members['activation-manifest.json']
+        need(len(inventory_raw) <= MAX_JSON and hashlib.sha256(inventory_raw).hexdigest() == pins['inventory_sha256'],
+             'INVENTORY_PIN_MISMATCH')
+        inventory = strict_json(inventory_raw.decode('ascii'))
+        expected = dict(version=1, resource=pins['resource'], domain=pins['domain'],
+                        controller_source_sha=pins['source_merge_sha'], builder_source_sha=pins['builder_sha'],
+                        bundle_sha256=pins['bundle_sha256'], payload_sha256=pins['payload_sha256'])
+        need(type(inventory) is dict and set(inventory) == set(expected) | {'files'}
+             and type(inventory.get('version')) is int
+             and all(inventory.get(name) == value for name, value in expected.items()), 'BOOTSTRAP_INVENTORY_PINS')
+        hashes = inventory['files']
+        need(type(hashes) is dict and set(hashes) == _PROBE_FILES, 'BOOTSTRAP_MEMBER_INVENTORY')
+        for name in _PROBE_FILES:
+            need(type(hashes[name]) is str and re.fullmatch('[0-9a-f]{64}', hashes[name])
+                 and hashlib.sha256(members[name]).hexdigest() == hashes[name], 'BOOTSTRAP_MEMBER_DIGEST')
+        need(all(hashes[name] == pins['executable_sha256'][name] for name in _PROBE_EXECUTABLES),
+             'EXECUTABLE_CLOSURE_MISMATCH')
+        manifest = strict_json(members['manifest.json'].decode('ascii'))
+        need(type(manifest) is dict and type(manifest.get('version')) is int
+             and manifest == dict(version=1, source_sha=pins['source_merge_sha'],
+                                  bundle_sha256=pins['bundle_sha256'], payload_sha256=pins['payload_sha256']),
+             'BOOTSTRAP_MANIFEST_PINS')
+        bundle_hashes = {name: hashes[name] for name in ('protocol.py', 'controller.py', 'namespace_check.py', 'conditions.conf')}
+        need(hashes['conditions.conf'] == pins['payload_sha256']
+             and hashlib.sha256(_probe_canonical(bundle_hashes)).hexdigest() == pins['bundle_sha256'],
+             'PAYLOAD_PIN_MISMATCH')
+        return members
+    except Refused:
+        raise
+    except (tarfile.TarError, ValueError, UnicodeError, KeyError, TypeError, OverflowError, RecursionError):
+        raise Refused('BOOTSTRAP_ARCHIVE_SCHEMA_REFUSED') from None
+
+
+def _probe_header(pins, nonce, archive_size):
+    return dict(version='jsm-apache-bootstrap-probe-capsule-v1', operation='probe', nonce=nonce,
+                resource=pins['resource'], domain=pins['domain'], archive_size=archive_size,
+                **{name: pins[name] for name in _PROBE_PIN_NAMES})
+
+
+def build_bootstrap_probe_capsule(pins, archive, nonce):
+    """Build private opaque data, not an admission proof or runnable program.
+
+    No archive code executes. No file, credential, remote path or process is
+    accepted. Remote root-trusted staging and namespace probe are NOT implemented.
+    """
+    validate_pins(pins, require_binding=False)
+    _probe_nonce(nonce)
+    _probe_archive_members(archive, pins)
+    header = _probe_canonical(_probe_header(pins, nonce, len(archive)))
+    payload = _PROBE_MAGIC + len(header).to_bytes(4, 'big') + header + archive
+    return BootstrapProbeCapsule(payload, header)
+
+
+def open_bootstrap_probe_capsule(capsule, pins, nonce):
+    """Pure verification before any future extraction; returned members are private."""
+    validate_pins(pins, require_binding=False)
+    _probe_nonce(nonce)
+    raw = bytes(capsule) if type(capsule) is BootstrapProbeCapsule else capsule
+    need(type(raw) is bytes and len(_PROBE_MAGIC) + 4 <= len(raw) <= MAX_ARCHIVE + 4096
+         and raw.startswith(_PROBE_MAGIC), 'BOOTSTRAP_CAPSULE_FRAME')
+    start = len(_PROBE_MAGIC) + 4
+    size = int.from_bytes(raw[len(_PROBE_MAGIC):start], 'big')
+    need(0 < size <= 2048 and start + size < len(raw), 'BOOTSTRAP_CAPSULE_FRAME')
+    try:
+        header = strict_json(raw[start:start + size].decode('ascii'))
+    except (UnicodeError, RecursionError):
+        raise Refused('BOOTSTRAP_CAPSULE_FRAME') from None
+    archive = raw[start + size:]
+    need(header == _probe_header(pins, nonce, len(archive)) and type(header.get('archive_size')) is int,
+         'BOOTSTRAP_CAPSULE_PINS')
+    return BootstrapProbeContents(_probe_archive_members(archive, pins))
+
+
+def project_bootstrap_probe_receipt(raw, pins, nonce, *, expected_probe_pins=None):
+    """Validate an envelope around the unchanged twelve-field private receipt.
+
+    The future launcher supplies envelope nonce; activate.py is unchanged. Hash
+    format checks do not independently verify discovered context/authorized-key
+    preimages. Optional reviewed pins only compare; they never authorize install.
+    No timeout/transport claim is made by this pure byte validator.
+    """
+    validate_pins(pins, require_binding=False)
+    _probe_nonce(nonce)
+    need(type(raw) is bytes and 0 < len(raw) <= 8192, 'BOOTSTRAP_RECEIPT_SIZE')
+    try:
+        envelope = strict_json(raw.decode('ascii'))
+        need(type(envelope) is dict and set(envelope) == {'version', 'nonce', 'receipt'}
+             and envelope['version'] == 'jsm-apache-bootstrap-probe-receipt-v1' and envelope['nonce'] == nonce,
+             'BOOTSTRAP_RECEIPT_ENVELOPE')
+        receipt = envelope['receipt']
+        need(type(receipt) is dict and set(receipt) == _PROBE_RECEIPT_FIELDS
+             and receipt['status'] == 'PROBED_NOT_INSTALLED' and receipt['deploy_enabled'] is False
+             and receipt['namespace_configtest'] == 'PASS', 'BOOTSTRAP_PROBE_RECEIPT')
+        for name in ('binding_sha256', 'before_sha256', 'after_sha256', 'context_sha256',
+                     'authorized_keys_sha256', 'bundle_sha256', 'payload_sha256'):
+            need(type(receipt[name]) is str and re.fullmatch('[0-9a-f]{64}', receipt[name]), 'BOOTSTRAP_PROBE_DIGEST')
+        need(receipt['controller_source_sha'] == pins['source_merge_sha']
+             and receipt['bundle_sha256'] == pins['bundle_sha256'] and receipt['payload_sha256'] == pins['payload_sha256'],
+             'BOOTSTRAP_PROBE_SOURCE_PINS')
+        binding = receipt['binding']
+        need(type(binding) is dict and set(binding) == {'version', 'resource', 'domain', 'target', 'active_alias',
+             'alias_target', 'legacy_context_sha256', 'deploy_enabled'} and type(binding.get('version')) is int
+             and binding['version'] == 1 and binding['resource'] == pins['resource'] and binding['domain'] == pins['domain']
+             and binding['deploy_enabled'] is False and type(binding['legacy_context_sha256']) is str
+             and re.fullmatch('[0-9a-f]{64}', binding['legacy_context_sha256']), 'BOOTSTRAP_BINDING_SCHEMA')
+        for name, parent in (('target', '/etc/apache2/sites-available/'), ('active_alias', '/etc/apache2/sites-enabled/')):
+            value = binding[name]
+            need(type(value) is str and value.startswith(parent) and 0 < len(value[len(parent):]) <= 255
+                 and value[len(parent):] not in ('.', '..')
+                 and re.fullmatch(r'[^/\x00-\x1f\x7f]+', value[len(parent):]), 'BOOTSTRAP_BINDING_PATH')
+        alias = binding['alias_target']
+        need(type(alias) is str and 0 < len(alias) <= 512 and re.fullmatch(r'[^\x00-\x1f\x7f]+', alias)
+             and posixpath.normpath(posixpath.join('/etc/apache2/sites-enabled', alias)) == binding['target'],
+             'BOOTSTRAP_BINDING_ALIAS')
+        need(hashlib.sha256(_probe_canonical(binding)).hexdigest() == receipt['binding_sha256']
+             and (pins['binding_sha256'] is None or pins['binding_sha256'] == receipt['binding_sha256']),
+             'BOOTSTRAP_BINDING_DIGEST')
+        if expected_probe_pins is not None:
+            names = {'binding_sha256', 'context_sha256', 'authorized_keys_sha256'}
+            need(type(expected_probe_pins) is dict and set(expected_probe_pins) == names
+                 and all(type(expected_probe_pins[name]) is str and re.fullmatch('[0-9a-f]{64}', expected_probe_pins[name])
+                         and expected_probe_pins[name] == receipt[name] for name in names), 'BOOTSTRAP_EXPECTED_PROBE_PINS')
+        return receipt
+    except Refused:
+        raise
+    except (UnicodeError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
+        raise Refused('BOOTSTRAP_RECEIPT_SCHEMA_REFUSED') from None
