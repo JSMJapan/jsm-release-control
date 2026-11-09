@@ -26,12 +26,32 @@ GH_PATHS = {GH_REPO, GH_ENV, GH_ENV + '/deployment-branch-policies'}
 VM_PATH = '/api/vps/v1/virtual-machines'
 EXPECTED_IP = '187.77.118.50'
 EXPECTED_HOSTNAME = 'jsmjapan-prod-01'
+# Diagnostic comparison only, not accepted identity and never used as an API ID.
+# Hostinger documents the default-name convention (not this VM's actual name):
+# https://github.com/hostinger/deploy-on-vps/blob/78d5707ddc6bd4e4763a4cd7b722a86c6509ec8b/README.md#setting-up-secrets
+DIAGNOSTIC_RESOURCE_FQDN = 'srv1687281.hstgr.cloud'
 MAX_BYTES = 256 * 1024
 DEADLINE_SECONDS = 45
 
 
+def safe_error_evidence(value):
+    booleans = ('vm_object', 'id_valid', 'ipv4_array', 'hostname_expected',
+                'hostname_matches_exact_known_resource_fqdn', 'expected_id_matches')
+    if (type(value) is not dict or set(value) != set(booleans) | {'stage', 'expected_ip_count'}
+            or value['stage'] not in ('list_candidate', 'detail')
+            or value['expected_ip_count'] not in ('not_array', 'zero', 'one', 'multiple')
+            or any(type(value[name]) is not bool for name in booleans)):
+        return None
+    return dict(value)
+
+
 class Refused(Exception):
     """Fixed public codes only; never provider response or exception text."""
+
+    def __init__(self, code, *, error_evidence=None):
+        super().__init__(code)
+        self.error_evidence = (safe_error_evidence(error_evidence)
+                               if code == 'FIXED_RESOURCE_BINDING_NOT_VERIFIED' else None)
 
 
 class Api:
@@ -125,13 +145,24 @@ def policy_ready(repo, environment, branches):
         raise Refused('PROTECTED_OWNER_MAIN_ENVIRONMENT_REQUIRED')
 
 
-def bound_vm(vm, expected_id=None):
+def bound_vm(vm, expected_id=None, *, stage='list_candidate'):
     if (not isinstance(vm, dict) or type(vm.get('id')) is not int or not 0 < vm['id'] < 10 ** 15
             or vm.get('hostname') != EXPECTED_HOSTNAME
             or not isinstance(vm.get('ipv4'), list)
             or sum(isinstance(ip, dict) and ip.get('address') == EXPECTED_IP for ip in vm['ipv4']) != 1
             or (expected_id is not None and vm['id'] != expected_id)):
-        raise Refused('FIXED_RESOURCE_BINDING_NOT_VERIFIED')
+        obj = vm if isinstance(vm, dict) else {}
+        addresses = obj.get('ipv4')
+        count = (sum(isinstance(ip, dict) and ip.get('address') == EXPECTED_IP for ip in addresses)
+                 if isinstance(addresses, list) else None)
+        evidence = dict(stage=stage, vm_object=isinstance(vm, dict),
+                        id_valid=type(obj.get('id')) is int and 0 < obj['id'] < 10 ** 15,
+                        ipv4_array=isinstance(addresses, list),
+                        expected_ip_count='not_array' if count is None else 'zero' if count == 0 else 'one' if count == 1 else 'multiple',
+                        hostname_expected=obj.get('hostname') == EXPECTED_HOSTNAME,
+                        hostname_matches_exact_known_resource_fqdn=obj.get('hostname') == DIAGNOSTIC_RESOURCE_FQDN,
+                        expected_id_matches=expected_id is None or obj.get('id') == expected_id)
+        raise Refused('FIXED_RESOURCE_BINDING_NOT_VERIFIED', error_evidence=evidence)
     return vm['id']
 
 
@@ -155,7 +186,7 @@ def collect(api, env):
         raise Refused('ONE_FIXED_IP_RESOURCE_REQUIRED')
     vm_id = bound_vm(candidates[0])  # Never derives numeric ID from srv1687281 label.
     vm = api.get_json(PROVIDER, VM_PATH + '/' + str(vm_id), token)
-    bound_vm(vm, vm_id)  # Rebind list/detail before querying only this VM's keys.
+    bound_vm(vm, vm_id, stage='detail')  # Rebind list/detail before querying only this VM's keys.
     keys = api.get_json(PROVIDER, VM_PATH + '/' + str(vm_id) + '/ssh-keys', token)
     if not isinstance(keys, list) or len(keys) > 256 or any(not isinstance(key, dict) for key in keys):
         raise Refused('BOUNDED_ROOT_KEY_ARRAY_REQUIRED')
@@ -184,8 +215,13 @@ def main():
         return 0
     except Exception as error:
         reason = str(error) if isinstance(error, Refused) else 'INTERNAL_SCHEMA_OR_TRANSPORT_REJECTED'
-        print(json.dumps(dict(status='BLOCKED', reason=reason, provider_mutations='NOT_PERFORMED',
-                              ssh_options_preservation='UNVERIFIED', apache_channel='NOT_ACTIVATED'), sort_keys=True))
+        receipt = dict(status='BLOCKED', reason=reason, provider_mutations='NOT_PERFORMED',
+                       ssh_options_preservation='UNVERIFIED', apache_channel='NOT_ACTIVATED')
+        evidence = (safe_error_evidence(error.error_evidence)
+                    if isinstance(error, Refused) and reason == 'FIXED_RESOURCE_BINDING_NOT_VERIFIED' else None)
+        if evidence is not None:
+            receipt['error_evidence'] = evidence
+        print(json.dumps(receipt, sort_keys=True))
         return 1
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)

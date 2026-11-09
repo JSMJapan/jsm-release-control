@@ -177,5 +177,75 @@ class PreflightTest(unittest.TestCase):
         self.assertEqual(receipt['reason'], 'INTERNAL_SCHEMA_OR_TRANSPORT_REJECTED')
         self.assertNotIn('PRIVATE', output.getvalue())
 
+    def test_binding_failure_identifies_list_or_detail_with_closed_boolean_witness_and_no_extra_requests(self):
+        expected = dict(stage='list_candidate', vm_object=True, id_valid=True, ipv4_array=True,
+                        expected_ip_count='one', hostname_expected=False,
+                        hostname_matches_exact_known_resource_fqdn=False, expected_id_matches=True)
+        for case in ('known_resource_fqdn', 'arbitrary_hostname', 'invalid_id', 'duplicate_ip',
+                     'detail_rebound', 'detail_ip', 'detail_schema'):
+            with self.subTest(case=case):
+                fixtures = self.fixtures()
+                witness = dict(expected)
+                if case == 'known_resource_fqdn':
+                    fixtures[3][1]['hostname'] = 'srv1687281.hstgr.cloud'
+                    witness['hostname_matches_exact_known_resource_fqdn'] = True
+                if case == 'arbitrary_hostname': fixtures[3][1]['hostname'] = 'PRIVATE_HOSTNAME_TOKEN_ECHO'
+                if case == 'invalid_id':
+                    fixtures[3][1]['id'] = True
+                    witness.update(id_valid=False, hostname_expected=True)
+                if case == 'duplicate_ip':
+                    fixtures[3][1]['ipv4'].append(dict(address='187.77.118.50'))
+                    witness.update(expected_ip_count='multiple', hostname_expected=True)
+                if case.startswith('detail_'):
+                    witness.update(stage='detail', hostname_expected=True)
+                if case == 'detail_rebound':
+                    fixtures[4] = dict(fixtures[4], id=123)
+                    witness['expected_id_matches'] = False
+                if case == 'detail_ip':
+                    fixtures[4] = dict(fixtures[4], ipv4=[dict(address='PRIVATE_OTHER_IP')])
+                    witness['expected_ip_count'] = 'zero'
+                if case == 'detail_schema':
+                    fixtures[4] = None
+                    witness.update(vm_object=False, id_valid=False, ipv4_array=False,
+                                   expected_ip_count='not_array', hostname_expected=False, expected_id_matches=False)
+                client, calls = self.fake_client(fixtures)
+                with self.assertRaises(self.module.Refused) as failure:
+                    self.module.collect(client, self.context())
+                self.assertEqual(str(failure.exception), 'FIXED_RESOURCE_BINDING_NOT_VERIFIED')
+                self.assertEqual(getattr(failure.exception, 'error_evidence', None), witness)
+                provider = [path for host, path, token in calls if host == 'developers.hostinger.com']
+                self.assertEqual(len(provider), 2 if case.startswith('detail_') else 1)
+                self.assertFalse(any(path.endswith('/ssh-keys') for path in provider))
+
+    def test_main_binding_failure_projects_only_fixed_witness_not_raw_hostname_or_account_fields(self):
+        fixtures = self.fixtures()
+        fixtures[3][1]['hostname'] = 'PRIVATE_ACCOUNT_HOSTNAME'
+        client, calls = self.fake_client(fixtures)
+        output = io.StringIO()
+        with patch.object(self.module, 'Api', return_value=client), patch.dict(self.module.os.environ, self.context(), clear=True), \
+                patch.object(self.module.os.sys, 'argv', ['preflight.py']), \
+                patch.object(self.module.signal, 'signal'), patch.object(self.module.signal, 'setitimer'), \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(self.module.main(), 1)
+        receipt = json.loads(output.getvalue())
+        self.assertEqual(receipt['status'], 'BLOCKED')
+        self.assertEqual(receipt['reason'], 'FIXED_RESOURCE_BINDING_NOT_VERIFIED')
+        self.assertEqual(receipt.get('error_evidence', {}).get('stage'), 'list_candidate')
+        self.assertIs(receipt['error_evidence']['hostname_expected'], False)
+        self.assertEqual(receipt['provider_mutations'], 'NOT_PERFORMED')
+        for marker in ('PRIVATE', 'OTHER_ACCOUNT_VM', 'srv1687281.hstgr.cloud'):
+            self.assertNotIn(marker, output.getvalue())
+        self.assertFalse(any(path.endswith('/ssh-keys') for host, path, token in calls))
+
+    def test_failure_witness_rejects_extra_fields_non_boolean_values_and_unknown_stage(self):
+        valid = dict(stage='detail', vm_object=True, id_valid=True, ipv4_array=True,
+                     expected_ip_count='one', hostname_expected=False,
+                     hostname_matches_exact_known_resource_fqdn=False, expected_id_matches=True)
+        for changed in (dict(valid, raw_hostname='PRIVATE_HOSTNAME'), dict(valid, hostname_expected='PRIVATE_HOSTNAME'),
+                        dict(valid, stage='PRIVATE_STAGE'), dict(valid, expected_ip_count=987654321),
+                        dict(valid, id_valid=1)):
+            error = self.module.Refused('FIXED_RESOURCE_BINDING_NOT_VERIFIED', error_evidence=changed)
+            self.assertIsNone(error.error_evidence)
+
 
 if __name__ == '__main__': unittest.main()
