@@ -283,11 +283,12 @@ def _bounded(command, *, data=b'', limit=MAX_JSON, timeout=60):
         except subprocess.TimeoutExpired:
             raise Refused('PRIVATE_PROCESS_DEADLINE') from None
         finally:
-            if process.poll() is None:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+            # A normal parent exit can leave same-group children whose stdout
+            # is redirected. Reap the whole group on every completion path.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             try:
                 process.wait(timeout=1)
             except subprocess.TimeoutExpired:
