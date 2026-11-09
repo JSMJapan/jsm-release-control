@@ -37,6 +37,8 @@ class InstalledRouteTests(unittest.TestCase):
     def library(self):
         ns = dict(CODE_FILES=self.m.CODE_FILES, SITE_FILES=self.m.SITE_FILES, UNITS=self.m.UNITS,
                   FLAGS=self.m.FLAGS, NONCE=NONCE)
+        for name in ('CONFIG_FILES','BOOTSTRAP_FILES','DEPLOYER','CURRENT','DEPLOY_LOCK'):
+            if hasattr(self.m,name): ns[name]=getattr(self.m,name)
         exec(compile(self.m._ROOT_LIBRARY, '<reviewed-diagnostic-library>', 'exec'), ns)
         return ns
 
@@ -66,16 +68,26 @@ class InstalledRouteTests(unittest.TestCase):
         return Api(), calls
 
     def root_receipt(self):
-        return dict(version='jsm-test-installed-route-v1', nonce=NONCE, euid=0,
+        return dict(version='jsm-test-installed-route-v2', nonce=NONCE, euid=0,
             code_files=[dict(id=row[0], present=True, regular=True, mode=0o644, read_state='ok',
                 sha256=row[3], matches_reviewed=True) for row in self.m.CODE_FILES],
             sites=[dict(id=row[0], present=True, regular=True, read_state='ok', parse_state='ok',
                 **{name: False for name in FLAGS}) for row in self.m.SITE_FILES],
             services=[dict(id=name, load_state='loaded', active_state='active', sub_state='running') for name in self.m.UNITS],
+            configs=[dict(id=name,read_state='ok',profile_parse='supported',db_loopback_literal=None,
+                db_test_namespace_literal=None,db_target_descriptor_sha256=None,cache_filecache_literal=None,
+                mail_file_transport_literal=None,indirection_or_override='UNKNOWN') for name in
+                ('dotenv','common_local','params_local','console_local','api_local','common_main','api_main')],
+            bootstrap_files=[dict(id=name,present=True,regular=True,mode=420,read_state='ok',sha256='f'*64,
+                legacy_reference_only_literal_present=False) for name in ('api_entry','common_bootstrap')],
+            deployer=dict(id='deployer',present=True,regular=True,mode=493,read_state='ok',sha256='f'*64,matches_historical=False),
+            deployment_record_begin=dict(read_state='ok',sha='a'*40,deployed_at='2026-11-09T11:00:00Z'),
+            deployment_record_end=dict(read_state='ok',sha='a'*40,deployed_at='2026-11-09T11:00:00Z'),
+            deployment_record_stable=True,deploy_lock=dict(present=True,regular=True,mode=384,read_state='ok'),
             observation_state='OBSERVED')
 
     def outer(self, child=None):
-        return dict(version='jsm-test-installed-route-outer-v1', nonce=NONCE,
+        return dict(version='jsm-test-installed-route-outer-v2', nonce=NONCE,
                     principal='marinagurina', euid=1001,
                     root_diagnostic=self.root_receipt() if child is None else child)
 
@@ -229,7 +241,7 @@ IncludeOptional /some/other.conf
             self.assertEqual(result['observation_state'], 'PARTIAL'); self.assertNotIn('PRIVATE', json.dumps(result))
         for value in [dict(good, nonce='c'*32), dict(good, principal='root'), dict(good, euid=True), dict(good, extra='PRIVATE')]:
             with self.assertRaises(self.m.Refused): self.m.project_remote(json.dumps(value).encode(), NONCE)
-        for raw in [b'PRIVATE', b'x'*4097, b'\xff', json.dumps(good).replace('"euid": 1001','"euid": 1001, "euid": 1001').encode()]:
+        for raw in [b'PRIVATE', b'x'*8193, b'\xff', json.dumps(good).replace('"euid": 1001','"euid": 1001, "euid": 1001').encode()]:
             with self.assertRaises(self.m.Refused): self.m.project_remote(raw, NONCE)
 
     def test_child_failure_and_wrong_nonce_never_become_false_root_identity(self):
@@ -275,7 +287,7 @@ IncludeOptional /some/other.conf
             self.assertEqual(key.read_bytes(),b'SYNTHETIC_PRIVATE_KEY\n')
             self.assertEqual(key.stat().st_mode&0o777,0o600); self.assertEqual(key.parent.stat().st_mode&0o777,0o700)
             self.assertEqual((key.parent/'known_hosts').read_bytes(),KNOWN.encode())
-            self.assertEqual(limit,4096); self.assertTrue(0<timeout<=15)
+            self.assertEqual(limit,8192); self.assertTrue(0<timeout<=15)
             return 0,json.dumps(self.outer()).encode()
         api,calls=self.api()
         with patch.object(self.m,'PIN_SHA256',hashlib.sha256(KNOWN.encode()).hexdigest()), \
@@ -284,42 +296,279 @@ IncludeOptional /some/other.conf
         self.assertEqual(result['status'],'TEST_INSTALLED_ROUTE_OBSERVED')
         for name in ('installed_release_sha',): self.assertIsNone(result[name])
         self.assertEqual(result['active_include_binding'],'NOT_ESTABLISHED'); self.assertEqual(result['api302_cause'],'UNKNOWN')
-        self.assertEqual(result['api_health'],'NOT_TESTED'); self.assertNotIn('PRIVATE_KEY',json.dumps(result))
+        self.assertEqual(result['api_health'],'NOT_TESTED'); self.assertIsNone(result['serving_php_version'])
+        for key in ('db_target_identity','db_grants','db_data_provenance','egress_isolation'): self.assertEqual(result[key],'NOT_ESTABLISHED')
+        self.assertNotIn('PRIVATE_KEY',json.dumps(result))
         self.assertTrue(folders); self.assertTrue(all(not path.exists() for path in folders))
 
     def test_maximum_closed_receipt_fits_child_and_outer_caps_and_rejects_child_oversize(self):
         child=self.root_receipt()
         child['euid']=4294967295
-        # Loose independent scalar maxima also bound every correlated valid
-        # record; no raw path/content/error string is admitted by this schema.
-        for row in child['code_files']: row.update(present=False,regular=False,mode=4095,read_state='not_regular',matches_reviewed=False,sha256='f'*64)
+        # Maximize each admitted record with its actual schema correlations.
+        # Hashes/descriptors cannot coexist with unavailable/nonregular states.
+        for row in child['code_files']: row.update(mode=4095,matches_reviewed=False,sha256='f'*64)
         for row in child['sites']:
-            row.update(present=False,regular=False,read_state='not_regular',parse_state='unsupported')
-            row.update({name:False for name in FLAGS})
+            row['parse_state']='unsupported'
+            row.update({name:None for name in FLAGS})
         for row in child['services']: row.update(load_state='not-found',active_state='inactive',sub_state='running')
+        for row in child['configs']:
+            row.update(db_loopback_literal=True,db_test_namespace_literal=True,db_target_descriptor_sha256='f'*64,
+                cache_filecache_literal=False,mail_file_transport_literal=False)
+        for row in child['bootstrap_files']: row.update(mode=4095,legacy_reference_only_literal_present=False)
+        child['deployer'].update(mode=4095,matches_historical=False)
+        child['deploy_lock'].update(regular=False,mode=None,read_state='not_regular')
+        for name in ('deployment_record_begin','deployment_record_end'): child[name]['deployed_at']='2026-11-09T11:00:00.999999Z'
+        child['deployment_record_stable']=False
         compact=json.dumps(child,separators=(',',':')).encode()+b'\n'
-        self.assertEqual(len(compact),2760)
-        self.assertLessEqual(len(compact),3072)
-        self.assertLessEqual(len(json.dumps(self.outer(child),separators=(',',':')).encode()),4096)
+        self.assertLessEqual(len(compact),6144)
+        maximum_outer=self.outer(child); maximum_outer['euid']=4294967295
+        self.assertLessEqual(len(json.dumps(maximum_outer,separators=(',',':')).encode()+b'\n'),8192)
         self.assertNotIn('PRIVATE',compact.decode())
+        self.assertTrue(all(self.m._code_record(row,ref) is not None for row,ref in zip(child['code_files'],self.m.CODE_FILES)))
+        self.assertTrue(all(self.m._site_record(row,ref) is not None for row,ref in zip(child['sites'],self.m.SITE_FILES)))
+        self.assertTrue(all(self.m._config_record(row,ref) is not None for row,ref in zip(child['configs'],self.m.CONFIG_FILES)))
+        self.assertTrue(all(self.m._bootstrap_record(row,ref) is not None for row,ref in zip(child['bootstrap_files'],self.m.BOOTSTRAP_FILES)))
+        self.assertIsNotNone(self.m._deployer_record(child['deployer'])); self.assertIsNotNone(self.m._lock_projection(child['deploy_lock']))
+        self.assertTrue(all(self.m._service_record(row,name) is not None for row,name in zip(child['services'],self.m.UNITS)))
+        for name in ('deployment_record_begin','deployment_record_end'): self.assertIsNotNone(self.m._deployment_projection(child[name]))
         valid=json.dumps(self.outer(),separators=(',',':')).encode()
-        with self.assertRaises(self.m.Refused): self.m.project_remote(valid+b' '*(4097-len(valid)),NONCE)
+        with self.assertRaises(self.m.Refused): self.m.project_remote(valid+b' '*(8193-len(valid)),NONCE)
 
-    def test_observer_reads_only_nine_fixed_files_and_emits_no_raw_bytes(self):
-        ns=self.library(); calls=[]
+    def test_observer_reads_exactly_21_paths_and_never_lock_body_or_config_hash(self):
+        ns=self.library(); calls=[]; metadata=[]
         def read(path,deadline):
             calls.append(path)
-            raw=b'ServerName develop.jsmjapan.com\n' if path.startswith('/etc/apache2/') else b'SYNTHETIC_CODE'
-            return dict(present=True,regular=True,mode=0o644,read_state='ok',raw=raw)
+            if path.startswith('/etc/apache2/'): raw=b'ServerName develop.jsmjapan.com\n'
+            elif path==self.m.CURRENT: raw=b'{"sha":"'+b'a'*40+b'","deployed_at":"2026-11-09T11:00:00Z"}'
+            elif path.endswith('.env'): raw=b'DB_HOST=localhost\nDB_NAME=test_1568\nPASSWORD=PRIVATE'
+            elif path in [row[1] for row in self.m.CONFIG_FILES]: raw=b'<?php return [];'
+            else: raw=b'SYNTHETIC_CODE LEGACY_REFERENCE_ONLY'
+            return dict(present=True,regular=True,mode=0o644,read_state='ok',raw=raw,identity=(1,2,3))
         ns['_read_fixed']=read
+        ns['_metadata_fixed']=lambda path,deadline:metadata.append(path) or dict(present=True,regular=True,mode=384,read_state='ok')
         ns['_services']=lambda deadline:self.root_receipt()['services']
         with patch.object(os,'geteuid',return_value=0): root=ns['_observe'](NONCE)
-        self.assertEqual(calls,[row[1] for row in self.m.CODE_FILES]+[row[1] for row in self.m.SITE_FILES])
+        expected=[self.m.CURRENT]+[row[1] for row in self.m.CODE_FILES]+[row[1] for row in self.m.SITE_FILES]
+        expected += [self.m.DEPLOYER[1]]+[row[1] for row in self.m.BOOTSTRAP_FILES]+[row[1] for row in self.m.CONFIG_FILES]+[self.m.CURRENT]
+        self.assertEqual(calls,expected); self.assertEqual(metadata,[self.m.DEPLOY_LOCK])
+        self.assertEqual(len(set(calls+metadata)),21); self.assertTrue(root['deployment_record_stable'])
         self.assertTrue(all(row['matches_reviewed'] is False for row in root['code_files']))
-        self.assertTrue(all(row['sha256']==hashlib.sha256(b'SYNTHETIC_CODE').hexdigest() for row in root['code_files']))
-        self.assertNotIn('SYNTHETIC_CODE',json.dumps(root)); self.assertNotIn('/etc/',json.dumps(root))
-        result=self.m.project_remote(json.dumps(self.outer(root)).encode(),NONCE)
-        self.assertEqual(result['observation_state'],'OBSERVED')
+        for row in root['configs']: self.assertNotIn('sha256',row)
+        output=json.dumps(root,separators=(',',':'))
+        for value in ('PRIVATE','SYNTHETIC_CODE','/etc/','127.0.0.1','localhost','test_1568','identity','raw'):
+            self.assertNotIn(value,output)
+        result=self.m.project_remote(json.dumps(self.outer(root),separators=(',',':')).encode(),NONCE)
+        self.assertEqual(result['observation_state'],'OBSERVED'); self.assertTrue(result['sudo_root_identity'])
+
+    def test_v2_record_schema_is_closed_and_data_failure_keeps_both_confirmed_identities(self):
+        for mutate in [lambda c:c['configs'][0].update(db_loopback_literal='PRIVATE'),
+                       lambda c:c['configs'][0].update(extra='PRIVATE'),
+                       lambda c:c['configs'][0].update(db_target_descriptor_sha256='f'*64),
+                       lambda c:c['configs'][0].update(profile_parse='unsupported',cache_filecache_literal=True),
+                       lambda c:c['configs'][0].update(read_state='absent'),
+                       lambda c:c['configs'][0].update(indirection_or_override='SAFE'),
+                       lambda c:c['bootstrap_files'][0].update(legacy_reference_only_literal_present=1),
+                       lambda c:c['deployer'].update(matches_historical=True),
+                       lambda c:c['deployment_record_begin'].update(deployed_at='PRIVATE'),
+                       lambda c:c['deploy_lock'].update(extra='PRIVATE')]:
+            value=self.outer(); mutate(value['root_diagnostic'])
+            projected=self.m.project_remote(json.dumps(value,separators=(',',':')).encode(),NONCE)
+            self.assertTrue(projected['ssh_identity']); self.assertTrue(projected['sudo_root_identity'])
+            self.assertEqual(projected['observation_state'],'PARTIAL'); self.assertNotIn('PRIVATE',json.dumps(projected))
+        old=self.outer(); old['root_diagnostic']['version']='jsm-test-installed-route-v1'
+        projected=self.m.project_remote(json.dumps(old,separators=(',',':')).encode(),NONCE)
+        self.assertTrue(projected['ssh_identity']); self.assertIsNone(projected['sudo_root_identity'])
+
+    def test_v2_deployment_stability_distinguishes_byte_identity_change_and_unavailable(self):
+        for mode,expected in [('same',True),('different_bytes',False),('different_inode',False),('unavailable',None)]:
+            ns=self.library(); count=[0]
+            def read(path,deadline):
+                if path==self.m.CURRENT:
+                    count[0]+=1
+                    if mode=='unavailable': return dict(present=None,regular=None,mode=None,read_state='unreadable',raw=None)
+                    raw=b'{"sha":"'+b'a'*40+b'","deployed_at":"2026-11-09T11:00:00Z"}'
+                    if mode=='different_bytes' and count[0]==2: raw+=b' '
+                    return dict(present=True,regular=True,mode=384,read_state='ok',raw=raw,
+                        identity=(1,count[0] if mode=='different_inode' else 1))
+                return dict(present=False,regular=None,mode=None,read_state='absent',raw=None)
+            ns['_read_fixed']=read; ns['_services']=lambda deadline:self.root_receipt()['services']
+            ns['_metadata_fixed']=lambda path,deadline:dict(present=False,regular=None,mode=None,read_state='absent')
+            with patch.object(os,'geteuid',return_value=0): value=ns['_observe'](NONCE)
+            self.assertIs(value['deployment_record_stable'],expected)
+
+    def test_v2_config_projection_reads_literals_without_exporting_private_values(self):
+        ns=self.library(); self.assertIn('_parse_config',ns,'v2 literal projection is missing')
+        parse=ns['_parse_config']
+        raw=b"<?php return ['components'=>['db'=>['dsn'=>'mysql:host=127.0.0.1;dbname=jsm_sandbox_1568','username'=>'PRIVATE_USER','password'=>'PRIVATE_VALUE'],'cache'=>['class'=>'yii\\caching\\FileCache'],'mailer'=>['useFileTransport'=>true]]];"
+        facts=parse(raw,'php')
+        self.assertEqual(facts['profile_parse'],'supported')
+        for key in ('db_loopback_literal','db_test_namespace_literal','cache_filecache_literal','mail_file_transport_literal'):
+            self.assertIs(facts[key],True,key)
+        expected=hashlib.sha256(b'{"db_name":"jsm_sandbox_1568","host":"127.0.0.1"}').hexdigest()
+        self.assertEqual(facts['db_target_descriptor_sha256'],expected)
+        self.assertEqual(parse(raw.replace(b'PRIVATE_USER',b'OTHER_PRIVATE_USER').replace(b'PRIVATE_VALUE',b'OTHER_PRIVATE_VALUE'),'php'),facts)
+        self.assertEqual(facts['indirection_or_override'],'UNKNOWN')
+        for value in ('PRIVATE','mysql:','127.0.0.1','jsm_sandbox_1568','FileCache'):
+            self.assertNotIn(value,json.dumps(facts))
+
+    def test_v2_selected_literals_allow_dynamic_siblings_but_never_resolve_them(self):
+        ns=self.library(); self.assertIn('_parse_config',ns); parse=ns['_parse_config']
+        raw=b"<?php return ['vendorPath'=>dirname(dirname(__DIR__)).'/vendor','components'=>['formatter'=>['options'=>[NumberFormatter::MIN_FRACTION_DIGITS=>0]],'cache'=>['class'=>'yii\\caching\\FileCache'],'log'=>['traceLevel'=>YII_DEBUG?3:0],'mailer'=>['useFileTransport'=>false]]];"
+        facts=parse(raw,'php')
+        self.assertEqual(facts['profile_parse'],'supported'); self.assertIs(facts['cache_filecache_literal'],True)
+        self.assertIs(facts['mail_file_transport_literal'],False); self.assertIsNone(facts['db_loopback_literal'])
+        for value in [b"<?php if (true) { return ['components'=>['cache'=>['class'=>'yii\\caching\\FileCache']]]; }",
+                      b"<?php $params=require 'PRIVATE'; return [];",
+                      b"<?php return ['components'=>getenv('PRIVATE')];",
+                      b"<?php return ['components'=>['cache'=>['class'=>getenv('PRIVATE')]]];"]:
+            row=parse(value,'php')
+            self.assertIsNone(row['cache_filecache_literal']); self.assertEqual(row['indirection_or_override'],'UNKNOWN')
+        row=parse(b"<?php return ['components'=>['cache'=>['class'=>'yii\\caching\\FileCache'.'PRIVATE']]];",'php')
+        self.assertIsNone(row['cache_filecache_literal'])
+
+    def test_v2_php_lexer_comments_strings_duplicates_and_limits_cannot_spoof_facts(self):
+        ns=self.library(); self.assertIn('_parse_config',ns); parse=ns['_parse_config']
+        for raw in [b"<?php // 'components'=>['cache'=>['class'=>'yii\\caching\\FileCache']]\nreturn ['password'=>\"'components'=>['cache'=>['class'=>'yii\\\\caching\\\\FileCache']]\"];",
+                    b"<?php /* 'components'=>['cache'=>['class'=>'yii\\caching\\FileCache']] */ return [];",
+                    b"<?php return ['components'=>['cache'=>['class'=>'PRIVATE']]];",
+                    b"<?php return ['components'=>['cache'=>['class'=>\"${PRIVATE}\"]]];"]:
+            self.assertIsNot(parse(raw,'php')['cache_filecache_literal'],True)
+        for raw in [b"<?php return ['components'=>[], 'components'=>[]];",b"<?php return ['components'=>['cache'=>['class'=>'x','class'=>'y']]];",
+                    b"<?php return ['components'=>[]]; PRIVATE",b"<?php return ['x'=>'unterminated];",
+                    b"<?php return ['x'=>"+b'['*17+b']'*17+b'];',b'x'*65537,b'\x00',b'\xff']:
+            row=parse(raw,'php'); self.assertEqual(row['profile_parse'],'unsupported')
+            self.assertTrue(all(row[key] is None for key in ('db_loopback_literal','db_target_descriptor_sha256','cache_filecache_literal')))
+
+    def test_v2_dotenv_dsn_and_alias_agreement_are_closed_and_nonsecret(self):
+        ns=self.library(); self.assertIn('_parse_config',ns); parse=ns['_parse_config']
+        raw=b'PASSWORD="PRIVATE DB_HOST=external; DB_NAME=prod"\nDB_DSN="mysql:host=localhost;dbname=test_1568"\nDB_HOST=localhost\nDB_DATABASE=test_1568\n'
+        row=parse(raw,'dotenv'); self.assertEqual(row['profile_parse'],'supported')
+        self.assertIs(row['db_loopback_literal'],True); self.assertIs(row['db_test_namespace_literal'],True)
+        self.assertEqual(row['db_target_descriptor_sha256'],hashlib.sha256(b'{"db_name":"test_1568","host":"localhost"}').hexdigest())
+        for raw in [raw+b'DB_NAME=other\n',raw.replace(b'DB_HOST=localhost',b'DB_HOST=127.0.0.1'),
+                    b'DB_DSN="mysql:host=localhost;dbname=test_a"\nDB_DSN="mysql:host=localhost;dbname=test_a"',
+                    b'DB_HOST=localhost\nDB_NAME=test_a\nDB_DATABASE=test_b',
+                    b'DB_DSN="mysql:host=localhost;dbname=test_a;password=PRIVATE"',
+                    b'DB_DSN="mysql:host=localhost;host=localhost;dbname=test_a"']:
+            row=parse(raw,'dotenv'); self.assertIsNone(row['db_loopback_literal']); self.assertIsNone(row['db_target_descriptor_sha256'])
+            self.assertNotIn('PRIVATE',json.dumps(row))
+
+    def test_v2_dotenv_physical_records_interpolation_and_quoted_secret_spoofing_fail_closed(self):
+        ns=self.library(); self.assertIn('_parse_config',ns); parse=ns['_parse_config']
+        for raw in [b'PASSWORD="PRIVATE\nDB_HOST=localhost\nDB_NAME=test_a"',
+                    b'PASSWORD="PRIVATE" DB_HOST=localhost\nDB_NAME=test_a',
+                    b'# comment \\\nDB_HOST=localhost\nDB_NAME=test_a',
+                    b'DB_HOST=${PRIVATE}\nDB_NAME=test_a',b'DB_HOST=$(PRIVATE)\nDB_NAME=test_a',
+                    b'DB_HOST=localhost\x0bDB_NAME=test_a',b'DB_HOST=localhost\nDB_NAME=test_a\nPASSWORD="bad',
+                    b'PASSWORD="PRIVATE"\nPASSWORD="PRIVATE"\nDB_HOST=localhost\nDB_NAME=test_a']:
+            row=parse(raw,'dotenv'); self.assertEqual(row['profile_parse'],'unsupported')
+            self.assertIsNone(row['db_loopback_literal']); self.assertNotIn('PRIVATE',json.dumps(row))
+        row=parse(b'# full-line\nPASSWORD="DB_HOST=external # opaque" # comment\nDB_HOST=localhost\nDB_NAME=test_a\n','dotenv')
+        self.assertIs(row['db_loopback_literal'],True)
+
+    def test_v2_php_tag_boundaries_and_attributes_never_turn_nonphp_text_into_literals(self):
+        parse=self.library()['_parse_config']
+        body=b"return ['components'=>['cache'=>['class'=>'yii\\caching\\FileCache']]];"
+        for raw in [b'<?php // ?>\n'+body,b'<?php # ?>\n'+body,b'<?php#[Synthetic]\n'+body,
+                    b'<?php #[Synthetic]\n'+body,b'<?php'+body,b'<?php <?php '+body,
+                    b"<?php return ['password'=>0 ?> PRIVATE <?php 0,'components'=>['cache'=>['class'=>'yii\\caching\\FileCache']]];",
+                    b"<?php return [ # comment\r 'components'=>[],\n'components'=>['cache'=>['class'=>'yii\\caching\\FileCache']]];"]:
+            row=parse(raw,'php')
+            self.assertEqual(row['profile_parse'],'unsupported',raw)
+            self.assertIsNone(row['cache_filecache_literal'])
+        row=parse(b"<?php /* ?> #[Synthetic] */ return ['password'=>'?>','components'=>['cache'=>['class'=>'yii\\caching\\FileCache']]];",'php')
+        self.assertEqual(row['profile_parse'],'supported'); self.assertIs(row['cache_filecache_literal'],True)
+
+    def test_v2_heredoc_and_nowdoc_text_cannot_impersonate_selected_config_literals(self):
+        parse=self.library()['_parse_config']
+        body=b"'components'=>['db'=>['dsn'=>'mysql:host=localhost;dbname=jsm_sandbox'],'cache'=>['class'=>'yii\\caching\\FileCache'],'mailer'=>['useFileTransport'=>true]],\n 'fake'=>\nEND\n];\n"
+        for opening in (b'END',b"'END'",b'"END"'):
+            raw=b"<?php return [\n 'unused' => <<<"+opening+b'\n,\n '+body
+            with self.subTest(opening=opening):
+                row=parse(raw,'php')
+                self.assertEqual(row['profile_parse'],'unsupported')
+                for key in ('db_loopback_literal','db_test_namespace_literal','db_target_descriptor_sha256',
+                            'cache_filecache_literal','mail_file_transport_literal'):
+                    self.assertIsNone(row[key],key)
+
+    def test_v2_unescaped_php_interpolation_cannot_desynchronize_quote_boundaries(self):
+        parse=self.library()['_parse_config']
+        raw=(b"<?php return [\n 'password' => \"{$x[\"\n,\n "
+             b"'components'=>['db'=>['dsn'=>'mysql:host=localhost;dbname=jsm_sandbox'],'cache'=>['class'=>'yii\\caching\\FileCache'],'mailer'=>['useFileTransport'=>true]],\n"
+             b" 'fake' =>\n\"]}\",\n];\n")
+        for value in (raw,b'<?php return ["unused"=>"$PRIVATE"];',b'<?php return ["unused"=>"${PRIVATE}"];'):
+            with self.subTest(raw=value):
+                row=parse(value,'php'); self.assertEqual(row['profile_parse'],'unsupported')
+                for key in ('db_loopback_literal','db_test_namespace_literal','db_target_descriptor_sha256',
+                            'cache_filecache_literal','mail_file_transport_literal'):
+                    self.assertIsNone(row[key],key)
+                self.assertNotIn('PRIVATE',json.dumps(row))
+
+    def test_v2_unsupported_php_markers_remain_opaque_in_ordinary_literals_and_block_comments(self):
+        parse=self.library()['_parse_config']
+        raw=(b"<?php /* <<<END $PRIVATE ?> */ return ['password'=>'<<<END $x[\" ?>',"
+             b"'other'=>\"<<<END ?>\",'escaped'=>\"PRIVATE\\$x\",'components'=>['cache'=>['class'=>'yii\\caching\\FileCache']]];")
+        row=parse(raw,'php')
+        self.assertEqual(row['profile_parse'],'supported'); self.assertIs(row['cache_filecache_literal'],True)
+        for value in ('PRIVATE','<<<','?>','$x'): self.assertNotIn(value,json.dumps(row))
+        # A real closing tag outside quoted strings/block comments stays refused.
+        row=parse(b"<?php return ['unused'=>0 ?> , 'components'=>['cache'=>['class'=>'yii\\caching\\FileCache']]];",'php')
+        self.assertEqual(row['profile_parse'],'unsupported'); self.assertIsNone(row['cache_filecache_literal'])
+
+    def test_v2_deployment_timestamp_fraction_is_bounded_and_normalized_without_raw_text(self):
+        parse=self.library()['_deployment_record']
+        row=parse(dict(read_state='ok',raw=b'{"sha":"'+b'a'*40+b'","deployed_at":"2026-11-09T20:00:00.123+09:00"}'))
+        self.assertEqual(row['deployed_at'],'2026-11-09T11:00:00.123000Z')
+        self.assertIsNotNone(self.m._deployment_projection(row))
+        row=parse(dict(read_state='ok',raw=b'{"deployed_at":"2026-11-09T20:00:00.1234567Z"}'))
+        self.assertIsNone(row['deployed_at'])
+
+    def test_v2_lexical_delimiter_strings_never_become_structure_or_selected_keys(self):
+        ns=self.library(); parse=ns['_parse_config']
+        for value in (b',',b']',b')',b';',b'[',b'('):
+            raw=b"<?php return ['password'=>'"+value+b"','components'=>['cache'=>['class'=>'yii\\caching\\FileCache']]];"
+            row=parse(raw,'php')
+            self.assertEqual(row['profile_parse'],'supported'); self.assertIs(row['cache_filecache_literal'],True)
+        row=parse(b"<?php return ['components'=>['db'=>['dsn'=>'mysql:host=localhost;dbname=test_a'], 'db'=>['dsn'=>'mysql:host=external;dbname=prod']]];",'php')
+        self.assertEqual(row['profile_parse'],'unsupported'); self.assertIsNone(row['db_target_descriptor_sha256'])
+        services=self.service_bytes()+b'\n'*4096
+        self.assertIsNone(ns['_parse_services'](services))
+
+    def test_v2_namespace_is_anchored_and_descriptor_is_not_an_endpoint_or_secret_hash(self):
+        ns=self.library(); self.assertIn('_parse_config',ns); parse=ns['_parse_config']
+        for name,expected in [('test',True),('sandbox_1568',True),('jsm_test_a',True),('production_test',False),
+                              ('sandboxevil',False),('TEST',False),('test__a',False),('test_',False),('test_'+'a'*60,False)]:
+            row=parse(('DB_HOST=localhost\nDB_NAME='+name).encode(),'dotenv')
+            self.assertIs(row['db_test_namespace_literal'],expected)
+            self.assertEqual(row['db_target_descriptor_sha256'] is not None,expected)
+        for dsn in ('mysql:host=example.invalid;dbname=test_a','mysql:host=localhost;dbname=prod',
+                    'mysql:host=localhost;dbname=test_a;port=3306','mysql:host=::1;dbname=test_a;charset=utf8mb4'):
+            row=parse(('DB_DSN="'+dsn+'"').encode(),'dotenv')
+            self.assertIsNone(row['db_target_descriptor_sha256'])
+        self.assertIs(parse(b'DB_HOST=external.invalid\nDB_NAME=test_a','dotenv')['db_loopback_literal'],False)
+
+    def test_v2_deployment_record_projects_only_typed_fields_and_requires_both_stable_reads(self):
+        ns=self.library(); self.assertIn('_deployment_record',ns)
+        raw=b'{"sha":"'+b'a'*40+b'","deployed_at":"2026-11-09T20:00:00+09:00","PRIVATE":"PRIVATE"}'
+        row=ns['_deployment_record'](dict(read_state='ok',raw=raw))
+        self.assertEqual(row,dict(read_state='ok',sha='a'*40,deployed_at='2026-11-09T11:00:00Z'))
+        for raw in [b'{"sha":true,"deployed_at":"PRIVATE"}',b'{"sha":"a","sha":"b"}',b'{"x":NaN}',b'[]',b'\xff']:
+            row=ns['_deployment_record'](dict(read_state='ok',raw=raw))
+            self.assertIsNone(row['sha']); self.assertIsNone(row['deployed_at']); self.assertNotIn('PRIVATE',json.dumps(row))
+        for stamp in ('2026-11-09T12:00:00','2026-99-09T12:00:00Z','PRIVATE'):
+            row=ns['_deployment_record'](dict(read_state='ok',raw=json.dumps(dict(sha='a'*40,deployed_at=stamp)).encode()))
+            self.assertEqual(row['sha'],'a'*40); self.assertIsNone(row['deployed_at'])
+
+    def test_v2_lock_is_metadata_only_even_for_fifo_symlink_and_real_regular_file(self):
+        ns=self.library(); self.assertIn('_metadata_fixed',ns)
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder).resolve(); regular=root/'lock'; regular.write_bytes(b'PRIVATE')
+            fifo=root/'fifo'; os.mkfifo(fifo); link=root/'link'; link.symlink_to(regular)
+            with patch.object(os,'read',side_effect=AssertionError('metadata-only path body read')):
+                good=ns['_metadata_fixed'](str(regular),time.monotonic()+2)
+                self.assertEqual(good,dict(present=True,regular=True,mode=0o644,read_state='ok'))
+                for path in (fifo,link): self.assertIs(ns['_metadata_fixed'](str(path),time.monotonic()+2)['regular'],False)
+                self.assertIs(ns['_metadata_fixed'](str(root/'absent'),time.monotonic()+2)['present'],False)
 
     def service_transport(self, program):
         ns=self.library(); real=subprocess.Popen; children=[]
@@ -368,7 +617,7 @@ IncludeOptional /some/other.conf
                 '/usr/bin/python3','-I','-B','-S','-c'])
             tree=ast.parse(command[11])
             imports={item.name for node in ast.walk(tree) if isinstance(node,ast.Import) for item in node.names}
-            self.assertEqual(imports,{'errno','hashlib','json','os','re','selectors','signal','stat','subprocess','time'})
+            self.assertEqual(imports,{'datetime','errno','hashlib','json','os','re','selectors','signal','stat','subprocess','time'})
             self.assertEqual(kwargs['stdin'],subprocess.DEVNULL); self.assertEqual(kwargs['stderr'],subprocess.DEVNULL)
             self.assertTrue(kwargs['start_new_session'])
             program='import sys,time;time.sleep(%r);sys.stdout.buffer.write(%r);sys.stdout.flush();sys.exit(%d)'%(delay,raw,code)
@@ -383,7 +632,7 @@ IncludeOptional /some/other.conf
     def test_actual_outer_constant_enforces_child_caps_nonce_and_five_second_budget(self):
         valid=json.dumps(self.root_receipt(),separators=(',',':')).encode()
         result=self.execute_outer(valid); self.assertTrue(result['sudo_root_identity'])
-        for raw,code in [(valid,1),(valid+b' '*(3073-len(valid)),0),(b'PRIVATE_RAW',0),(b'\xff',0),
+        for raw,code in [(valid,1),(valid+b' '*(6145-len(valid)),0),(b'PRIVATE_RAW',0),(b'\xff',0),
                          (valid.replace(b'"euid":0',b'"euid":0,"euid":0'),0)]:
             result=self.execute_outer(raw,code=code)
             self.assertTrue(result['ssh_identity']); self.assertIsNone(result['sudo_root_identity'])
@@ -411,7 +660,7 @@ IncludeOptional /some/other.conf
         with patch.object(self.m.sys,'argv',['probe','--path','PRIVATE']), patch.object(self.m.signal,'setitimer'), \
                 patch.object(self.m,'collect',side_effect=AssertionError('must not run')),contextlib.redirect_stdout(output):
             self.assertEqual(self.m.main(),1)
-        receipt=json.loads(output.getvalue()); self.assertIsNone(receipt['ssh_identity'])
+        receipt=json.loads(output.getvalue()); self.assertEqual(receipt['receipt_version'],'jsm-test-installed-route-v2'); self.assertIsNone(receipt['ssh_identity'])
         self.assertIsNone(receipt['sudo_root_identity']); self.assertNotIn('PRIVATE',output.getvalue())
 
 
