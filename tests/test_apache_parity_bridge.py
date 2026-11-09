@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import socket
 import stat
 import subprocess
 import sys
@@ -429,6 +430,60 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual({}, api.get_json(bridge.PUBLIC_REPO_PATH))
         self.assertTrue(observed)
         self.assertTrue(all(0 < timeout <= .051 for timeout in observed))
+
+    def closing_http_response(self, raw, declared_length, *, fragment=None, transfer_encoding=None):
+        """Real HTTPResponse socket lifetime; socketpair never reaches a network."""
+        client, server = socket.socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(server.close)
+        connection = bridge.http.client.HTTPConnection('api.github.com', 443)
+        connection.sock = client
+        self.addCleanup(connection.close)
+        observed = []
+        original_response = connection.response_class
+        class Response(original_response):
+            def read1(inner, size):
+                value = super().read1(min(size, fragment) if fragment else size)
+                observed.append((len(value), client.fileno()))
+                return value
+        connection.response_class = Response
+        wire = (b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n'
+                + b'Content-Length: ' + str(declared_length).encode('ascii') + b'\r\n'
+                + (b'Transfer-Encoding: ' + transfer_encoding.encode('ascii') + b'\r\n' if transfer_encoding else b'')
+                + b'\r\n' + raw)
+        server.sendall(wire)
+        server.shutdown(socket.SHUT_WR)
+        return connection, observed
+
+    def test_content_length_completion_does_not_reuse_closed_response_socket(self):
+        raw = b'{"safe":true}'
+        connection, observed = self.closing_http_response(raw, len(raw))
+        with patch.object(bridge.http.client, 'HTTPSConnection', return_value=connection):
+            self.assertEqual({'safe': True}, bridge.PublicPolicyApi().get_json(bridge.PUBLIC_REPO_PATH))
+        self.assertEqual(sum(size for size, _ in observed), len(raw))
+        self.assertIsNone(connection.sock)
+
+    def test_content_length_fragmented_reads_stop_at_exact_body_completion(self):
+        raw = b'{"safe":true}'
+        connection, observed = self.closing_http_response(raw, len(raw), fragment=3)
+        with patch.object(bridge.http.client, 'HTTPSConnection', return_value=connection):
+            self.assertEqual({'safe': True}, bridge.PublicPolicyApi().get_json(bridge.PUBLIC_REPO_PATH))
+        self.assertEqual([size for size, _ in observed], [3, 3, 3, 3, 1])
+
+    def test_content_length_truncated_body_is_rejected_before_json_acceptance(self):
+        raw = b'{}'  # Valid JSON is still not the complete declared HTTP body.
+        connection, _ = self.closing_http_response(raw, len(raw) + 1)
+        with patch.object(bridge.http.client, 'HTTPSConnection', return_value=connection):
+            with self.assertRaisesRegex(bridge.Refused, '^GITHUB_RESPONSE_LENGTH_MISMATCH$'):
+                bridge.PublicPolicyApi().get_json(bridge.PUBLIC_REPO_PATH)
+
+    def test_content_length_with_chunked_framing_cannot_accept_only_a_json_prefix(self):
+        # HTTPResponse uses chunked framing over Content-Length. An early length
+        # stop would accept '{}' and ignore the second chunk's invalid suffix.
+        connection, _ = self.closing_http_response(b'2\r\n{}\r\n1\r\nx\r\n0\r\n\r\n', 2, transfer_encoding='chunked')
+        with patch.object(bridge.http.client, 'HTTPSConnection', return_value=connection):
+            with self.assertRaisesRegex(bridge.Refused, '^GITHUB_RESPONSE_LENGTH_MISMATCH$'):
+                bridge.PublicPolicyApi().get_json(bridge.PUBLIC_REPO_PATH)
 
     def test_private_import_snapshot_is_owned_exact_and_removed_after_child(self):
         with tempfile.TemporaryDirectory() as temporary:

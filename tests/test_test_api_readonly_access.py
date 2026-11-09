@@ -324,6 +324,60 @@ class TestAccessProbe(unittest.TestCase):
             self.assertEqual(self.module.main(), 1)
         self.assertTrue(json.loads(output.getvalue())['ssh_identity'])
 
+    def run_main(self, api, transport=None):
+        output = io.StringIO()
+        with patch.object(self.module.sys, 'argv', ['probe.py']), \
+                patch.object(self.module.signal, 'signal'), patch.object(self.module.signal, 'setitimer'), \
+                patch.object(self.module, 'TestPolicyApi', return_value=api), \
+                patch.dict(self.module.os.environ, self.context(), clear=True), \
+                patch.object(self.module, 'PIN_SHA256', hashlib.sha256(KNOWN.encode()).hexdigest()), \
+                patch.object(self.module.secrets, 'token_hex', return_value=NONCE), \
+                patch.object(self.module, '_bounded', side_effect=transport), contextlib.redirect_stdout(output):
+            code = self.module.main()
+        return code, json.loads(output.getvalue())
+
+    def test_policy_http_failures_report_closed_stage_and_safe_shared_reason(self):
+        for index, stage in enumerate(('policy_repository', 'policy_environment', 'policy_branches')):
+            for error, expected in [(self.module.Refused('GITHUB_RESPONSE_LENGTH_MISMATCH'), 'GITHUB_RESPONSE_LENGTH_MISMATCH'),
+                                    (RuntimeError('PRIVATE_BODY PRIVATE_HEADER'), 'TEST_ACCESS_PROBE_REJECTED'),
+                                    (self.module.Refused('PRIVATE_BODY'), 'TEST_ACCESS_PROBE_REJECTED')]:
+                api, _ = self.api(); original = api.get_json; calls = []
+                def request(path):
+                    calls.append(path)
+                    if len(calls) == index + 1: raise error
+                    return original(path)
+                api.get_json = request
+                code, result = self.run_main(api, lambda *a, **k: self.fail('SSH started after policy failure'))
+                self.assertEqual(code, 1); self.assertEqual(result['failure_stage'], stage)
+                self.assertEqual(result['reason'], expected)
+                self.assertIsNone(result['ssh_identity']); self.assertIsNone(result['sudo_root_identity'])
+                self.assertRegex(result['python_version'], r'^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$')
+                self.assertNotIn('PRIVATE', json.dumps(result))
+
+    def test_ssh_and_remote_failures_report_distinct_closed_stages_without_raw_data(self):
+        for result_or_error, stage, reason in [
+                (self.module.Refused('PRIVATE_PROCESS_DEADLINE'), 'ssh_transport', 'PRIVATE_PROCESS_DEADLINE'),
+                (OSError('PRIVATE_KEY PRIVATE_STDERR'), 'ssh_transport', 'TEST_ACCESS_PROBE_REJECTED'),
+                ((1, b'PRIVATE_STDOUT'), 'ssh_transport', 'SSH_TRANSPORT_NOT_CONFIRMED'),
+                ((0, b'PRIVATE_STDOUT'), 'remote_identity', 'REMOTE_IDENTITY_SCHEMA_REJECTED')]:
+            api, _ = self.api()
+            def transport(*args, **kwargs):
+                if isinstance(result_or_error, Exception): raise result_or_error
+                return result_or_error
+            code, result = self.run_main(api, transport)
+            self.assertEqual(code, 1); self.assertEqual(result['failure_stage'], stage)
+            self.assertEqual(result['reason'], reason)
+            self.assertIsNone(result['ssh_identity']); self.assertIsNone(result['sudo_root_identity'])
+            self.assertNotIn('PRIVATE_KEY', json.dumps(result)); self.assertNotIn('PRIVATE_STDOUT', json.dumps(result))
+            self.assertNotIn('PRIVATE_STDERR', json.dumps(result))
+
+    def test_partial_identity_failure_stage_keeps_confirmed_ssh_and_unknown_sudo(self):
+        api, _ = self.api()
+        code, result = self.run_main(api, lambda *args, **kwargs: (0, json.dumps(self.payload(child_euid=None)).encode()))
+        self.assertEqual(code, 1); self.assertEqual(result['failure_stage'], 'remote_identity')
+        self.assertTrue(result['ssh_identity']); self.assertEqual(result['ssh_euid'], 1000)
+        self.assertIsNone(result['sudo_root_identity'])
+
     def test_workflow_has_no_inputs_and_scopes_secret_to_fixed_protected_probe_step(self):
         # Validate the actual YAML structure, including no probe on pull requests.
         # JSON is a YAML subset, keeping this offline suite stdlib-only.
