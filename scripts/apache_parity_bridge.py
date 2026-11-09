@@ -135,6 +135,9 @@ class _GitHubGet:
             if self.token is not None:
                 headers['Authorization'] = 'Bearer ' + self.token
             connection.request('GET', path, body=None, headers=headers)
+            body_socket = connection.sock  # getresponse() detaches it for Connection: close.
+            need(body_socket is not None, 'GITHUB_SOCKET_REQUIRED')
+            body_socket.settimeout(self.remaining())
             response = connection.getresponse()
             need(response.status == 200, 'GITHUB_GET_STATUS_REFUSED')  # Redirects are never followed.
             need((response.getheader('Content-Type') or '').split(';')[0].strip().lower() == 'application/json',
@@ -145,9 +148,7 @@ class _GitHubGet:
             need(length is None or (re.fullmatch('[0-9]+', length) and int(length) <= MAX_JSON), 'GITHUB_RESPONSE_LIMIT')
             raw = bytearray()
             while True:
-                self.remaining()
-                if connection.sock is not None:
-                    connection.sock.settimeout(self.remaining())
+                body_socket.settimeout(self.remaining())
                 chunk = response.read1(min(16384, MAX_JSON + 1 - len(raw)))
                 raw.extend(chunk)
                 need(len(raw) <= MAX_JSON, 'GITHUB_RESPONSE_LIMIT')
@@ -263,14 +264,25 @@ def _bounded(command, *, data=b'', limit=MAX_JSON, timeout=60):
                     for key, _ in selector.select(min(.2, remaining)):
                         chunk = os.read(key.fileobj.fileno(), min(16384, limit + 1 - len(output)))
                         if not chunk:
-                            return process.wait(timeout=max(.001, remaining)), bytes(output)
+                            left = deadline - time.monotonic()
+                            need(left > 0, 'PRIVATE_PROCESS_DEADLINE')
+                            return process.wait(timeout=left), bytes(output)
                         output.extend(chunk)
                         need(len(output) <= limit, 'PRIVATE_PROCESS_OUTPUT_LIMIT')
+        except subprocess.TimeoutExpired:
+            raise Refused('PRIVATE_PROCESS_DEADLINE') from None
         finally:
             if process.poll() is None:
-                os.killpg(process.pid, signal.SIGKILL)
-            process.wait()
-            process.stdout.close()
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                raise Refused('PRIVATE_PROCESS_DEADLINE') from None
+            finally:
+                process.stdout.close()
 
 
 def _git(root, *arguments, required=True):
@@ -319,7 +331,15 @@ def _checkout(pins, source_checkout):
         code, _ = _git(root, 'cat-file', '-e', pins['source_merge_sha'] + ':' + path, required=False)
         need(code == 0, 'SELECTED_SOURCE_CHECKER_REQUIRED')
     directory = root / 'infra/apache-parity'
-    need(directory.resolve() == directory and {path.name for path in directory.glob('*.py')} == set(CLOSURE),
+    _, tree = _git(root, 'ls-tree', '--name-only', pins['builder_sha'] + ':infra/apache-parity')
+    entries = []
+    for path in directory.iterdir():
+        need(len(entries) < 64, 'EXECUTABLE_CLOSURE_MISMATCH')
+        entries.append(path)
+    need(directory.resolve() == directory and {path.name for path in entries} == set(tree.decode().splitlines())
+         and {path.name for path in entries if path.suffix == '.py'} == set(CLOSURE)
+         and all(not path.is_symlink() and path.is_file() and path.suffix in ('.py', '.md', '.json', '.conf', '.sh')
+                 for path in entries),
          'EXECUTABLE_CLOSURE_MISMATCH')
     for name in CLOSURE:
         path = directory / name
@@ -334,7 +354,7 @@ _PRIVATE_WORKER = r'''
 import hashlib,json,pathlib,sys,tempfile
 data=json.loads(sys.stdin.buffer.read(262145))
 root=pathlib.Path(data['root'])
-sys.path.insert(0,str(root/'infra/apache-parity'))
+sys.path.insert(0,data['import_root'])
 from activation_verify import run_ready,compare_archive
 from activation_pack import build_activation
 from prepare import source_ready
@@ -345,7 +365,7 @@ try:
  run_ready(m['run'],p['builder_sha'])
  source=source_ready(m['pr'],m['checks'],data.get('operation','inspect'))
  if source!=p['source_merge_sha']: raise Refuse('SOURCE_PIN_MISMATCH')
- with tempfile.TemporaryDirectory(prefix='jsm-private-source-') as temporary:
+ with tempfile.TemporaryDirectory(prefix='rebuild-',dir=data['work_root']) as temporary:
   output=pathlib.Path(temporary)/'pack'
   if data['task']=='verify':
    manifest=build_activation(root,m['pr'],m['checks'],p['builder_sha'],output)
@@ -394,9 +414,25 @@ def _private_call(task, pins, root, metadata, **arguments):
         need(type(pre) is dict and set(pre) <= {'before_sha256', 'after_sha256', 'context_sha256', 'check_sha256'},
              'FIXED_PREIMAGE_FIELDS_REQUIRED')
         safe['request'] = pre
-    data = json.dumps(dict(task=task, pins=pins, root=str(root), metadata=safe, **arguments)).encode()
-    need(len(data) <= MAX_JSON, 'PRIVATE_INPUT_LIMIT')
-    code, raw = _bounded(['/usr/bin/python3', '-I', '-B', '-c', _PRIVATE_WORKER], data=data, limit=8192)
+    with tempfile.TemporaryDirectory(prefix='jsm-private-worker-') as temporary:
+        work = Path(temporary)
+        imports = work / 'imports'
+        imports.mkdir(mode=0o700)
+        # Import a fresh private snapshot of reviewed Git bytes, never worktree
+        # caches/extensions or archive members. The parent also owns cleanup if
+        # the bounded child is killed before its own finally/context cleanup.
+        for name in CLOSURE:
+            _, source = _git(root, 'cat-file', 'blob', pins['builder_sha'] + ':infra/apache-parity/' + name)
+            need(hashlib.sha256(source).hexdigest() == pins['executable_sha256'][name], 'EXECUTABLE_CLOSURE_MISMATCH')
+            path = imports / name
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(descriptor, 'wb') as stream:
+                stream.write(source)
+            need(_read_regular(path, MAX_JSON) == source, 'EXECUTABLE_CLOSURE_MISMATCH')
+        data = json.dumps(dict(task=task, pins=pins, root=str(root), metadata=safe, import_root=str(imports),
+                               work_root=str(work), **arguments)).encode()
+        need(len(data) <= MAX_JSON, 'PRIVATE_INPUT_LIMIT')
+        code, raw = _bounded(['/usr/bin/python3', '-I', '-B', '-c', _PRIVATE_WORKER], data=data, limit=8192)
     try:
         result = strict_json(raw.decode('ascii'))
         if code or result.get('status') != 'OK':

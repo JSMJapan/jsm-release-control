@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import stat
 import subprocess
 import sys
 import tarfile
@@ -231,8 +232,9 @@ class BridgeTests(unittest.TestCase):
         reply = Reply()
         reply.status = status
         class Connection:
-            sock = None
-            def __init__(self): self.calls, self.closed = [], False
+            class Socket:
+                def settimeout(self, value): pass
+            def __init__(self): self.calls, self.closed, self.sock = [], False, self.Socket()
             def request(self, method, path, body, headers): self.calls.append((method, path, body, headers))
             def getresponse(self): return reply
             def close(self): self.closed = True
@@ -380,6 +382,77 @@ class BridgeTests(unittest.TestCase):
             with self.assertRaisesRegex(bridge.Refused, 'PRIVATE_PROCESS_DEADLINE'):
                 bridge._bounded(['/usr/bin/python3', '-I', '-B', '-c', 'import time; time.sleep(2)'], timeout=.05)
         self.assertEqual('', saved.getvalue())
+
+    def test_closed_stdout_then_sleep_is_a_fixed_bounded_deadline_refusal(self):
+        started = bridge.time.monotonic()
+        with self.assertRaisesRegex(bridge.Refused, '^PRIVATE_PROCESS_DEADLINE$'):
+            bridge._bounded(['/usr/bin/python3', '-I', '-B', '-c',
+                             'import os,time; os.close(1); time.sleep(2)'], timeout=.05)
+        self.assertLess(bridge.time.monotonic() - started, 1)
+
+    def test_ignored_import_cache_and_extension_artifacts_refuse_before_import(self):
+        for extra in ('__pycache__', 'protocol.pyc', 'protocol.so'):
+            with self.subTest(extra=extra), tempfile.TemporaryDirectory() as temporary:
+                repo, p, _ = self.fixture(temporary)
+                (repo / '.git/info/exclude').write_text('__pycache__/\n*.pyc\n*.so\n')
+                path = repo / 'infra/apache-parity' / extra
+                if extra == '__pycache__':
+                    path.mkdir()
+                    path = path / 'synthetic.pyc'
+                path.write_bytes(b'benign nonexecutable import-inventory fixture')
+                self.assertEqual('', git(repo, 'status', '--porcelain', '--untracked-files=all'))
+                with self.assertRaisesRegex(bridge.Refused, 'EXECUTABLE_CLOSURE_MISMATCH'):
+                    bridge._checkout(p, repo)
+
+    def test_connection_close_response_keeps_current_remaining_body_timeout(self):
+        connection, reply = self.http_fixture()
+        class Socket:
+            def __init__(self): self.timeout = 1
+            def settimeout(self, value): self.timeout = value
+        retained = Socket()
+        connection.sock = retained
+        clock, observed = {'now': 0}, []
+        original_read = reply.read1
+        def getresponse():
+            clock['now'] = .95
+            connection.sock = None  # http.client detaches a Connection: close response.
+            return reply
+        def read1(size):
+            observed.append(retained.timeout)
+            return original_read(size)
+        connection.getresponse, reply.read1 = getresponse, read1
+        api = bridge.PublicPolicyApi()
+        api.deadline = 1
+        with patch.object(bridge.time, 'monotonic', side_effect=lambda: clock['now']), \
+             patch.object(bridge.http.client, 'HTTPSConnection', return_value=connection):
+            self.assertEqual({}, api.get_json(bridge.PUBLIC_REPO_PATH))
+        self.assertTrue(observed)
+        self.assertTrue(all(0 < timeout <= .051 for timeout in observed))
+
+    def test_private_import_snapshot_is_owned_exact_and_removed_after_child(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo, p, archive = self.fixture(temporary)
+            actual_bounded, observed = bridge._bounded, []
+            def run(command, **kwargs):
+                if command[0] != '/usr/bin/python3':
+                    return actual_bounded(command, **kwargs)
+                data = json.loads(kwargs['data'])
+                self.assertIn('import_root', data)
+                directory = Path(data['import_root'])
+                observed.append(directory.parent)
+                self.assertNotEqual(repo / 'infra/apache-parity', directory)
+                self.assertEqual(0o700, stat.S_IMODE(directory.stat().st_mode))
+                self.assertEqual(set(bridge.CLOSURE), {path.name for path in directory.iterdir()})
+                for name in bridge.CLOSURE:
+                    path = directory / name
+                    self.assertEqual(0o600, stat.S_IMODE(path.stat().st_mode))
+                    self.assertEqual(p['executable_sha256'][name], hashlib.sha256(path.read_bytes()).hexdigest())
+                return 0, b'{"status":"OK","result":{"fixture":"synthetic"}}'
+            with patch.object(bridge, '_bounded', side_effect=run):
+                self.assertEqual({'fixture': 'synthetic'}, bridge._private_call('verify', p, repo, metadata(p),
+                                                                              archive=str(archive)))
+            self.assertEqual(1, len(observed))
+            self.assertFalse(observed[0].exists())
 
     def test_source_only_cli_cannot_upload_private_payload_or_access_credentials(self):
         result = subprocess.run(['/usr/bin/python3', '-I', '-B', str(ROOT / 'scripts/apache_parity_bridge.py')],
