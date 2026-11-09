@@ -392,6 +392,24 @@ class BridgeTests(unittest.TestCase):
                              'import os,time; os.close(1); time.sleep(2)'], timeout=.05)
         self.assertLess(bridge.time.monotonic() - started, 1)
 
+    def test_normal_exit_cleans_same_group_descendant_with_redirected_stdout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            ready, late = Path(temporary) / 'ready', Path(temporary) / 'late'
+            child = ("import pathlib,time; pathlib.Path(" + repr(str(ready)) + ").write_text('ready'); "
+                     "time.sleep(.4); pathlib.Path(" + repr(str(late)) + ").write_text('late')")
+            parent = ("import pathlib,subprocess,sys,time; "
+                      "subprocess.Popen([sys.executable,'-I','-B','-c'," + repr(child) + "],"
+                      "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
+                      "deadline=time.monotonic()+1\n"
+                      "while not pathlib.Path(" + repr(str(ready)) + ").exists() and time.monotonic()<deadline: time.sleep(.005)\n"
+                      "assert pathlib.Path(" + repr(str(ready)) + ").exists()\n"
+                      "print('ok')")
+            code, output = bridge._bounded(['/usr/bin/python3', '-I', '-B', '-c', parent], timeout=2, limit=32)
+            self.assertEqual((0, b'ok\n'), (code, output))
+            self.assertTrue(ready.exists(), 'The real descendant must start before its parent exits')
+            bridge.time.sleep(.65)
+            self.assertFalse(late.exists(), 'A same-group descendant must not outlive normal parent completion')
+
     def test_ignored_import_cache_and_extension_artifacts_refuse_before_import(self):
         for extra in ('__pycache__', 'protocol.pyc', 'protocol.so'):
             with self.subTest(extra=extra), tempfile.TemporaryDirectory() as temporary:
