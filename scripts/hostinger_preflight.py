@@ -25,11 +25,11 @@ GH_ENV = GH_REPO + '/environments/' + ENVIRONMENT
 GH_PATHS = {GH_REPO, GH_ENV, GH_ENV + '/deployment-branch-policies'}
 VM_PATH = '/api/vps/v1/virtual-machines'
 EXPECTED_IP = '187.77.118.50'
-EXPECTED_HOSTNAME = 'jsmjapan-prod-01'
-# Diagnostic comparison only, not accepted identity and never used as an API ID.
-# Hostinger documents the default-name convention (not this VM's actual name):
+EXPECTED_HOSTNAME = 'srv1687281.hstgr.cloud'
+# Exact pin observed in owner-approved read-only run42570712441; never an API ID.
+# Comparison alias retained for the stable failure receipt. Default-name format:
 # https://github.com/hostinger/deploy-on-vps/blob/78d5707ddc6bd4e4763a4cd7b722a86c6509ec8b/README.md#setting-up-secrets
-DIAGNOSTIC_RESOURCE_FQDN = 'srv1687281.hstgr.cloud'
+DIAGNOSTIC_RESOURCE_FQDN = EXPECTED_HOSTNAME
 MAX_BYTES = 256 * 1024
 DEADLINE_SECONDS = 45
 

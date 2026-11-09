@@ -29,7 +29,7 @@ class PreflightTest(unittest.TestCase):
                     HOSTINGER_API_TOKEN='PRIVATE_TOKEN_FIXTURE')
 
     def fixtures(self, vm_id=987654321):
-        vm = dict(id=vm_id, hostname='jsmjapan-prod-01', state='running',
+        vm = dict(id=vm_id, hostname='srv1687281.hstgr.cloud', state='running',
                   ipv4=[dict(id=123, address='187.77.118.50', ptr='PRIVATE_PTR')], subscription_id='PRIVATE_BILLING')
         env = dict(can_admins_bypass=False, protection_rules=[dict(type='required_reviewers', prevent_self_review=False,
                    reviewers=[dict(type='User', reviewer=dict(login='JSMJapan'))])],
@@ -63,6 +63,28 @@ class PreflightTest(unittest.TestCase):
         output = json.dumps(result)
         for secret in ('PRIVATE_TOKEN', 'PRIVATE_PTR', 'PRIVATE_BILLING', 'PRIVATE_RAW_ROOT_KEY', 'PRIVATE_NAME', 'OTHER_ACCOUNT_VM'):
             self.assertNotIn(secret, output)
+
+    def test_observed_provider_hostname_is_the_only_pin_and_former_friendly_name_is_rejected_at_both_stages(self):
+        client, calls = self.fake_client(self.fixtures())
+        result = self.module.collect(client, self.context())
+        self.assertEqual(result['hostname'], 'srv1687281.hstgr.cloud')
+        self.assertEqual(result['vm_id'], 987654321)
+        for stage in ('list_candidate', 'detail'):
+            fixtures = self.fixtures()
+            if stage == 'list_candidate':
+                fixtures[3][1] = dict(fixtures[3][1], hostname='jsmjapan-prod-01')
+            else:
+                fixtures[4] = dict(fixtures[4], hostname='jsmjapan-prod-01')
+            client, calls = self.fake_client(fixtures)
+            with self.assertRaises(self.module.Refused) as failure:
+                self.module.collect(client, self.context())
+            self.assertEqual(str(failure.exception), 'FIXED_RESOURCE_BINDING_NOT_VERIFIED')
+            self.assertEqual(failure.exception.error_evidence['stage'], stage)
+            self.assertIs(failure.exception.error_evidence['hostname_expected'], False)
+            self.assertIs(failure.exception.error_evidence['hostname_matches_exact_known_resource_fqdn'], False)
+            provider = [path for host, path, token in calls if host == 'developers.hostinger.com']
+            self.assertEqual(len(provider), 1 if stage == 'list_candidate' else 2)
+            self.assertFalse(any(path.endswith('/ssh-keys') for path in provider))
 
     def test_unknown_duplicate_or_rebound_resource_never_reaches_ssh_key_endpoint(self):
         for case in ('hostname', 'duplicate', 'rebound', 'bool_id'):
@@ -181,23 +203,21 @@ class PreflightTest(unittest.TestCase):
         expected = dict(stage='list_candidate', vm_object=True, id_valid=True, ipv4_array=True,
                         expected_ip_count='one', hostname_expected=False,
                         hostname_matches_exact_known_resource_fqdn=False, expected_id_matches=True)
-        for case in ('known_resource_fqdn', 'arbitrary_hostname', 'invalid_id', 'duplicate_ip',
+        for case in ('former_friendly_name', 'arbitrary_hostname', 'invalid_id', 'duplicate_ip',
                      'detail_rebound', 'detail_ip', 'detail_schema'):
             with self.subTest(case=case):
                 fixtures = self.fixtures()
                 witness = dict(expected)
-                if case == 'known_resource_fqdn':
-                    fixtures[3][1]['hostname'] = 'srv1687281.hstgr.cloud'
-                    witness['hostname_matches_exact_known_resource_fqdn'] = True
+                if case == 'former_friendly_name': fixtures[3][1]['hostname'] = 'jsmjapan-prod-01'
                 if case == 'arbitrary_hostname': fixtures[3][1]['hostname'] = 'PRIVATE_HOSTNAME_TOKEN_ECHO'
                 if case == 'invalid_id':
                     fixtures[3][1]['id'] = True
-                    witness.update(id_valid=False, hostname_expected=True)
+                    witness.update(id_valid=False, hostname_expected=True, hostname_matches_exact_known_resource_fqdn=True)
                 if case == 'duplicate_ip':
                     fixtures[3][1]['ipv4'].append(dict(address='187.77.118.50'))
-                    witness.update(expected_ip_count='multiple', hostname_expected=True)
+                    witness.update(expected_ip_count='multiple', hostname_expected=True, hostname_matches_exact_known_resource_fqdn=True)
                 if case.startswith('detail_'):
-                    witness.update(stage='detail', hostname_expected=True)
+                    witness.update(stage='detail', hostname_expected=True, hostname_matches_exact_known_resource_fqdn=True)
                 if case == 'detail_rebound':
                     fixtures[4] = dict(fixtures[4], id=123)
                     witness['expected_id_matches'] = False
@@ -207,7 +227,8 @@ class PreflightTest(unittest.TestCase):
                 if case == 'detail_schema':
                     fixtures[4] = None
                     witness.update(vm_object=False, id_valid=False, ipv4_array=False,
-                                   expected_ip_count='not_array', hostname_expected=False, expected_id_matches=False)
+                                   expected_ip_count='not_array', hostname_expected=False,
+                                   hostname_matches_exact_known_resource_fqdn=False, expected_id_matches=False)
                 client, calls = self.fake_client(fixtures)
                 with self.assertRaises(self.module.Refused) as failure:
                     self.module.collect(client, self.context())
