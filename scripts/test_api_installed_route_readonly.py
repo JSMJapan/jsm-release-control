@@ -247,7 +247,7 @@ def _php_tokens(text):
     while pos<len(text):
         c=text[pos]
         if c in ' \t\r\n': pos+=1; continue
-        if text.startswith('?>',pos) or text.startswith('#[',pos): raise ValueError()
+        if any(text.startswith(marker,pos) for marker in ('?>','#[','<<<')): raise ValueError()
         if text.startswith('//',pos) or c=='#':
             end=text.find('\n',pos); end=len(text) if end<0 else end
             if '?>' in text[pos:end]: raise ValueError()
@@ -264,7 +264,8 @@ def _php_tokens(text):
             while pos<len(text) and text[pos]!=quote:
                 c=text[pos]
                 if ord(c)<32 and c not in '\r\n\t': raise ValueError()
-                if quote=='"' and c=='$': dynamic=True
+                # Interpolation has nested lexical boundaries outside this subset.
+                if quote=='"' and c=='$': raise ValueError()
                 if c=='\\':
                     pos+=1
                     if pos>=len(text): raise ValueError()

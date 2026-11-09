@@ -479,6 +479,42 @@ IncludeOptional /some/other.conf
         row=parse(b"<?php /* ?> #[Synthetic] */ return ['password'=>'?>','components'=>['cache'=>['class'=>'yii\\caching\\FileCache']]];",'php')
         self.assertEqual(row['profile_parse'],'supported'); self.assertIs(row['cache_filecache_literal'],True)
 
+    def test_v2_heredoc_and_nowdoc_text_cannot_impersonate_selected_config_literals(self):
+        parse=self.library()['_parse_config']
+        body=b"'components'=>['db'=>['dsn'=>'mysql:host=localhost;dbname=jsm_sandbox'],'cache'=>['class'=>'yii\\caching\\FileCache'],'mailer'=>['useFileTransport'=>true]],\n 'fake'=>\nEND\n];\n"
+        for opening in (b'END',b"'END'",b'"END"'):
+            raw=b"<?php return [\n 'unused' => <<<"+opening+b'\n,\n '+body
+            with self.subTest(opening=opening):
+                row=parse(raw,'php')
+                self.assertEqual(row['profile_parse'],'unsupported')
+                for key in ('db_loopback_literal','db_test_namespace_literal','db_target_descriptor_sha256',
+                            'cache_filecache_literal','mail_file_transport_literal'):
+                    self.assertIsNone(row[key],key)
+
+    def test_v2_unescaped_php_interpolation_cannot_desynchronize_quote_boundaries(self):
+        parse=self.library()['_parse_config']
+        raw=(b"<?php return [\n 'password' => \"{$x[\"\n,\n "
+             b"'components'=>['db'=>['dsn'=>'mysql:host=localhost;dbname=jsm_sandbox'],'cache'=>['class'=>'yii\\caching\\FileCache'],'mailer'=>['useFileTransport'=>true]],\n"
+             b" 'fake' =>\n\"]}\",\n];\n")
+        for value in (raw,b'<?php return ["unused"=>"$PRIVATE"];',b'<?php return ["unused"=>"${PRIVATE}"];'):
+            with self.subTest(raw=value):
+                row=parse(value,'php'); self.assertEqual(row['profile_parse'],'unsupported')
+                for key in ('db_loopback_literal','db_test_namespace_literal','db_target_descriptor_sha256',
+                            'cache_filecache_literal','mail_file_transport_literal'):
+                    self.assertIsNone(row[key],key)
+                self.assertNotIn('PRIVATE',json.dumps(row))
+
+    def test_v2_unsupported_php_markers_remain_opaque_in_ordinary_literals_and_block_comments(self):
+        parse=self.library()['_parse_config']
+        raw=(b"<?php /* <<<END $PRIVATE ?> */ return ['password'=>'<<<END $x[\" ?>',"
+             b"'other'=>\"<<<END ?>\",'escaped'=>\"PRIVATE\\$x\",'components'=>['cache'=>['class'=>'yii\\caching\\FileCache']]];")
+        row=parse(raw,'php')
+        self.assertEqual(row['profile_parse'],'supported'); self.assertIs(row['cache_filecache_literal'],True)
+        for value in ('PRIVATE','<<<','?>','$x'): self.assertNotIn(value,json.dumps(row))
+        # A real closing tag outside quoted strings/block comments stays refused.
+        row=parse(b"<?php return ['unused'=>0 ?> , 'components'=>['cache'=>['class'=>'yii\\caching\\FileCache']]];",'php')
+        self.assertEqual(row['profile_parse'],'unsupported'); self.assertIsNone(row['cache_filecache_literal'])
+
     def test_v2_deployment_timestamp_fraction_is_bounded_and_normalized_without_raw_text(self):
         parse=self.library()['_deployment_record']
         row=parse(dict(read_state='ok',raw=b'{"sha":"'+b'a'*40+b'","deployed_at":"2026-11-09T20:00:00.123+09:00"}'))
