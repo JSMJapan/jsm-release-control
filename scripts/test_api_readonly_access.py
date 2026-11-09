@@ -38,7 +38,39 @@ OVERALL_SECONDS = 60
 SAFE_REASONS = frozenset(('OWNER_MANUAL_MAIN_TEST_WORKFLOW_REQUIRED', 'PROTECTED_TEST_OWNER_MAIN_ENVIRONMENT_REQUIRED',
     'TEST_SSH_KEY_NOT_CONFIGURED', 'EXACT_TEST_HOST_PIN_REQUIRED', 'NONCE_REQUIRED',
     'SSH_TRANSPORT_NOT_CONFIRMED', 'REMOTE_IDENTITY_SCHEMA_REJECTED', 'OVERALL_DEADLINE',
-    'NO_ARGUMENTS_OR_INPUTS_ACCEPTED', 'SUDO_ROOT_IDENTITY_NOT_CONFIRMED'))
+    'NO_ARGUMENTS_OR_INPUTS_ACCEPTED', 'SUDO_ROOT_IDENTITY_NOT_CONFIRMED',
+    'FIXED_GITHUB_GET_SCOPE_REQUIRED', 'GITHUB_READ_DEADLINE', 'GITHUB_SOCKET_REQUIRED',
+    'GITHUB_GET_STATUS_REFUSED', 'GITHUB_JSON_CONTENT_TYPE_REQUIRED', 'GITHUB_ENCODING_REFUSED',
+    'GITHUB_RESPONSE_LIMIT', 'GITHUB_RESPONSE_LENGTH_MISMATCH', 'GITHUB_TRANSPORT_OR_SCHEMA_REFUSED',
+    'DUPLICATE_JSON_FIELD', 'JSON_CONSTANT_REFUSED', 'JSON_RESPONSE_REFUSED',
+    'PRIVATE_PROCESS_DEADLINE', 'PRIVATE_PROCESS_OUTPUT_LIMIT'))
+FAILURE_STAGES = frozenset(('policy_repository', 'policy_environment', 'policy_branches',
+                           'credentials', 'host_pin', 'ssh_transport', 'remote_identity', 'unknown'))
+REASON_STAGES = {'TEST_SSH_KEY_NOT_CONFIGURED': 'credentials', 'EXACT_TEST_HOST_PIN_REQUIRED': 'host_pin',
+                 'SSH_TRANSPORT_NOT_CONFIRMED': 'ssh_transport', 'REMOTE_IDENTITY_SCHEMA_REJECTED': 'remote_identity'}
+
+
+def _safe_reason(error):
+    code = error.args[0] if isinstance(error, Refused) and len(error.args) == 1 else None
+    return code if type(code) is str and code in SAFE_REASONS else 'TEST_ACCESS_PROBE_REJECTED'
+
+
+class _ProbeFailure(Refused):
+    def __init__(self, stage, error):
+        super().__init__(_safe_reason(error))
+        self.failure_stage = stage if stage in FAILURE_STAGES else 'unknown'
+
+
+def _at_stage(stage, operation, *args, **kwargs):
+    try:
+        return operation(*args, **kwargs)
+    except Exception as error:
+        raise _ProbeFailure(stage, error) from None
+
+
+def _python_version():
+    value = '.'.join(str(part) for part in sys.version_info[:3])
+    return value if re.fullmatch(r'[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}', value) else 'unknown'
 
 
 def need(condition, code):
@@ -156,9 +188,9 @@ def private_file(path, value):
 def collect(api, env):
     deadline = time.monotonic() + OVERALL_SECONDS
     context_ready(env)  # Before all network/credential access.
-    repo = api.get_json(GH_REPO)
-    environment = api.get_json(GH_ENV)
-    branches = api.get_json(GH_ENV + '/deployment-branch-policies')
+    repo = _at_stage('policy_repository', api.get_json, GH_REPO)
+    environment = _at_stage('policy_environment', api.get_json, GH_ENV)
+    branches = _at_stage('policy_branches', api.get_json, GH_ENV + '/deployment-branch-policies')
     try:
         policy_ready(repo, environment, branches)  # Unchanged shared pure guard.
         reviewer = environment['protection_rules']
@@ -167,7 +199,7 @@ def collect(api, env):
              and reviewer['id'] == 327623967 and type(branches.get('total_count')) is int
              and branches['total_count'] == 1, 'PROTECTED_TEST_OWNER_MAIN_ENVIRONMENT_REQUIRED')
     except Exception:
-        raise Refused('PROTECTED_TEST_OWNER_MAIN_ENVIRONMENT_REQUIRED') from None
+        raise _ProbeFailure('policy_environment', Refused('PROTECTED_TEST_OWNER_MAIN_ENVIRONMENT_REQUIRED')) from None
     key = env.get('TEST_API_ADMIN_SSH_KEY')
     known = env.get('TEST_API_KNOWN_HOSTS')
     need(type(key) is str and 0 < len(key) <= 16384 and '\x00' not in key, 'TEST_SSH_KEY_NOT_CONFIGURED')
@@ -189,12 +221,13 @@ def collect(api, env):
             'marinagurina@34.104.157.63', '/usr/bin/python3', '-I', '-B', '-S', '-']
         budget = min(15, deadline - time.monotonic() - 2)  # Shared deadline, bounded kill/reap and receipt reserve.
         need(budget > 0, 'OVERALL_DEADLINE')
-        code, raw = _bounded(command, data=remote_program(nonce), limit=MAX_OUTPUT, timeout=budget)
+        code, raw = _at_stage('ssh_transport', _bounded, command, data=remote_program(nonce), limit=MAX_OUTPUT, timeout=budget)
         need(code == 0, 'SSH_TRANSPORT_NOT_CONFIRMED')
-        observed = project_remote(raw, nonce)
+        observed = _at_stage('remote_identity', project_remote, raw, nonce)
     confirmed = observed['sudo_root_identity'] is True
     return dict(observed, status='TEST_ACCESS_IDENTITY_CONFIRMED' if confirmed else 'BLOCKED',
         reason='FIXED_IDENTITY_CONFIRMED' if confirmed else 'SUDO_ROOT_IDENTITY_NOT_CONFIRMED',
+        failure_stage=None if confirmed else 'remote_identity',
         resource='gce:dark-berm-508215-d2:asia-northeast1-a:150919059249400713',
         project='dark-berm-508215-d2', zone='asia-northeast1-a', vm_id='150919059249400713',
         ip='34.104.157.63', ssh_port=22, known_hosts_sha256=PIN_SHA256,
@@ -212,12 +245,16 @@ def main():
         signal.setitimer(signal.ITIMER_REAL, OVERALL_SECONDS)  # Includes DNS, headers, files and subprocess.
         result = collect(TestPolicyApi(), os.environ)
         result['verified_at_utc'] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')
+        result['python_version'] = _python_version()
         print(json.dumps(result, sort_keys=True))
         return 0 if result['status'] == 'TEST_ACCESS_IDENTITY_CONFIRMED' else 1
     except Exception as error:
-        reason = str(error) if isinstance(error, Refused) and str(error) in SAFE_REASONS else 'TEST_ACCESS_PROBE_REJECTED'
+        reason = _safe_reason(error)
+        stage = getattr(error, 'failure_stage', REASON_STAGES.get(reason, 'unknown'))
+        stage = stage if type(stage) is str and stage in FAILURE_STAGES else 'unknown'
         print(json.dumps(dict(status='BLOCKED', reason=reason, ssh_identity=None, ssh_principal=None,
-            ssh_euid=None, sudo_root_identity=None, application_config_data_access='NOT_PERFORMED',
+            ssh_euid=None, sudo_root_identity=None, failure_stage=stage, python_version=_python_version(),
+            application_config_data_access='NOT_PERFORMED',
             provider_mutations='NOT_PERFORMED', test_api_acceptance='NOT_ESTABLISHED'), sort_keys=True))
         return 1
     finally:

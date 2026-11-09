@@ -149,14 +149,22 @@ class _GitHubGet:
                  'GITHUB_ENCODING_REFUSED')
             length = response.getheader('Content-Length')
             need(length is None or (re.fullmatch('[0-9]+', length) and int(length) <= MAX_JSON), 'GITHUB_RESPONSE_LIMIT')
+            need(length is None or response.getheader('Transfer-Encoding') is None, 'GITHUB_RESPONSE_LENGTH_MISMATCH')
+            expected_length = None if length is None else int(length)
             raw = bytearray()
-            while True:
+            # HTTPResponse.read1() may close its retained socket as soon as a
+            # known-length body completes. Do not settimeout() on that fd again.
+            while expected_length is None or len(raw) < expected_length:
                 body_socket.settimeout(self.remaining())
                 chunk = response.read1(min(16384, MAX_JSON + 1 - len(raw)))
                 raw.extend(chunk)
                 need(len(raw) <= MAX_JSON, 'GITHUB_RESPONSE_LIMIT')
+                need(expected_length is None or len(raw) <= expected_length, 'GITHUB_RESPONSE_LENGTH_MISMATCH')
                 if not chunk:
-                    return strict_json(raw.decode('utf-8'))
+                    need(expected_length is None or len(raw) == expected_length, 'GITHUB_RESPONSE_LENGTH_MISMATCH')
+                    break
+            self.remaining()
+            return strict_json(raw.decode('utf-8'))
         except Refused:
             raise
         except Exception:
