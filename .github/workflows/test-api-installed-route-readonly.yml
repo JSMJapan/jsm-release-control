@@ -1,0 +1,42 @@
+{
+  "name": "TEST #1568 — fixed installed-code and route observation",
+  "on": {"workflow_dispatch": {}},
+  "permissions": {"contents": "read"},
+  "concurrency": {"group": "test-api-installed-route-readonly", "cancel-in-progress": false},
+  "jobs": {
+    "offline": {
+      "name": "Offline TEST installed-code and route probe",
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 3,
+      "steps": [
+        {
+          "uses": "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+          "with": {"ref": "${{ github.sha }}", "persist-credentials": false}
+        },
+        {"run": "python3 -B -m unittest discover -s tests -p 'test_*.py'"}
+      ]
+    },
+    "probe": {
+      "name": "Fixed TEST installed-code and static route observation",
+      "needs": "offline",
+      "if": "github.event_name == 'workflow_dispatch' && github.repository == 'JSMJapan/jsm-release-control' && github.event.repository.private == false && github.actor == 'JSMJapan' && github.triggering_actor == 'JSMJapan' && github.ref == 'refs/heads/main' && github.run_attempt == 1",
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 2,
+      "environment": "test-api-readonly-access",
+      "steps": [
+        {
+          "uses": "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+          "with": {"ref": "${{ github.sha }}", "persist-credentials": false}
+        },
+        {
+          "name": "Verify fixed public policy and host pin, then observe only fixed TEST files, route literals and service states",
+          "env": {
+            "TEST_API_ADMIN_SSH_KEY": "${{ secrets.TEST_API_ADMIN_SSH_KEY }}",
+            "TEST_API_KNOWN_HOSTS": "${{ vars.TEST_API_KNOWN_HOSTS }}"
+          },
+          "run": "python3 -I -B scripts/test_api_installed_route_readonly.py"
+        }
+      ]
+    }
+  }
+}
