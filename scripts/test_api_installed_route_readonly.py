@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Fixed TEST disk/static-route observation. No application execution or request.
+"""Fixed TEST disk/static-route/readiness observation. No application execution or request.
 
 The reviewed constant diagnostic travels through SSH stdin; no remote code file
 is installed. Disk fingerprints and literal directives do not prove an installed
 release, active Apache configuration, PHP version, API302 cause or DB isolation.
+Fixed application configs can contain credentials: private bounded reads expose
+only selected nonsecret literal predicates, never contents or whole-config hashes.
 File reads and SSH/sudo/systemd audit/OS bookkeeping may occur.
 """
 import datetime
@@ -46,10 +48,23 @@ UNITS = ('jsm-front.service', 'apache2.service', 'php7.4-fpm.service', 'php8.5-f
 FLAGS = ('test_server_name_literal_present', 'api_alias_literal_present', 'api_proxy_exclusion_literal_present',
          'loopback_front_proxy_literal_present', 'rewrite_rule_present', 'include_or_conditional_present')
 
+CONFIG_FILES = (('dotenv', '/srv/jsm/app/backend/.env', 'dotenv'),
+    ('common_local', '/srv/jsm/app/backend/common/config/main-local.php', 'php'),
+    ('params_local', '/srv/jsm/app/backend/common/config/params-local.php', 'php'),
+    ('console_local', '/srv/jsm/app/backend/console/config/main-local.php', 'php'),
+    ('api_local', '/srv/jsm/app/backend/api/config/main-local.php', 'php'),
+    ('common_main', '/srv/jsm/app/backend/common/config/main.php', 'php'),
+    ('api_main', '/srv/jsm/app/backend/api/config/main.php', 'php'))
+BOOTSTRAP_FILES = (('api_entry', '/srv/jsm/app/backend/api/web/index.php'),
+    ('common_bootstrap', '/srv/jsm/app/backend/common/config/bootstrap.php'))
+DEPLOYER = ('deployer', '/usr/local/sbin/jsm-sandbox-deploy', '4b0815ff755c6b29165a8102f2bc47c2a7dd49a567b367b2c55637522996a6cc')
+CURRENT = '/srv/jsm/deploy/current.json'
+DEPLOY_LOCK = '/run/jsm-sandbox-deploy.lock'
+
 # Fixed diagnostic definitions; tests execute these same bytes on synthetic
 # owned fixtures. This library has no entry point, input parser or application import.
 _ROOT_LIBRARY = r'''
-import errno,hashlib,json,os,re,selectors,signal,stat,subprocess,time
+import datetime,errno,hashlib,json,os,re,selectors,signal,stat,subprocess,time
 class Deadline(Exception): pass
 def _check(deadline):
     if time.monotonic()>=deadline: raise Deadline()
@@ -113,7 +128,7 @@ def _read_fixed(path,deadline):
         after=os.fstat(leaf)
         if (len(raw)!=before.st_size or _stamp(before)!=_stamp(after)
             or not _binding(path,deadline,directories,before)): return dict(result,read_state='changed')
-        return dict(result,read_state='ok',raw=bytes(raw))
+        return dict(result,read_state='ok',raw=bytes(raw),identity=_stamp(before))
     except Deadline: return _empty('deadline')
     except OSError as error:
         return _empty('unsafe_path' if error.errno in (errno.ELOOP,errno.ENOTDIR,errno.ENOENT) else 'unreadable')
@@ -121,6 +136,233 @@ def _read_fixed(path,deadline):
     finally:
         if leaf is not None: os.close(leaf)
         for fd in reversed(fds): os.close(fd)
+def _metadata_fixed(path,deadline):
+    fds=[]
+    try:
+        fds,name=_parents(path,deadline); directories=[_dir_stamp(os.fstat(fd)) for fd in fds]
+        _check(deadline)
+        try: before=os.stat(name,dir_fd=fds[-1],follow_symlinks=False)
+        except FileNotFoundError:
+            row=dict(present=False,regular=None,mode=None,read_state='absent')
+            return row if _binding(path,deadline,directories,None) else {key:value for key,value in _empty('unsafe_path').items() if key!='raw'}
+        regular=stat.S_ISREG(before.st_mode)
+        row=dict(present=True,regular=regular,mode=stat.S_IMODE(before.st_mode) if regular else None,
+                 read_state='ok' if regular else 'not_regular')
+        if not _binding(path,deadline,directories,before): raise ValueError()
+        return row
+    except Deadline: state='deadline'
+    except OSError as error: state='unsafe_path' if error.errno in (errno.ELOOP,errno.ENOTDIR,errno.ENOENT) else 'unreadable'
+    except ValueError: state='unsafe_path'
+    finally:
+        for fd in reversed(fds): os.close(fd)
+    return dict(present=None,regular=None,mode=None,read_state=state)
+def _pairs(rows):
+    out={}
+    for key,value in rows:
+        if key in out: raise ValueError()
+        out[key]=value
+    return out
+def _invalid(value): raise ValueError()
+def _timestamp(value):
+    if type(value) is not str or not re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})',value): return None
+    try:
+        stamp=datetime.datetime.fromisoformat(value.replace('Z','+00:00'))
+        return stamp.astimezone(datetime.timezone.utc).isoformat(timespec='microseconds' if '.' in value else 'seconds').replace('+00:00','Z')
+    except (ValueError,OverflowError): return None
+def _deployment_record(row):
+    result=dict(read_state=row['read_state'],sha=None,deployed_at=None)
+    if row['raw'] is None: return result
+    try:
+        value=json.loads(row['raw'].decode('utf-8'),object_pairs_hook=_pairs,parse_constant=_invalid)
+        if type(value) is not dict: return result
+        sha=value.get('sha')
+        if type(sha) is str and re.fullmatch('[0-9a-f]{40}',sha): result['sha']=sha
+        result['deployed_at']=_timestamp(value.get('deployed_at'))
+    except (ValueError,UnicodeError,RecursionError): pass
+    return result
+def _config_unknown(state='unsupported'):
+    return dict(profile_parse=state,db_loopback_literal=None,db_test_namespace_literal=None,
+        db_target_descriptor_sha256=None,cache_filecache_literal=None,mail_file_transport_literal=None,indirection_or_override='UNKNOWN')
+def _dsn(value):
+    if type(value) is not str or not value.startswith('mysql:') or len(value)>512: return None
+    parts={}
+    for item in value[6:].split(';'):
+        if item.count('=')!=1: return None
+        key,text=item.split('=')
+        if key not in ('host','dbname') or key in parts or not text: return None
+        parts[key]=text
+    return (parts['host'],parts['dbname']) if set(parts)=={'host','dbname'} else None
+def _db_facts(pair):
+    if pair is None: return {}
+    host,name=pair
+    if (type(host) is not str or type(name) is not str or not re.fullmatch(r'[A-Za-z0-9.:-]{1,253}',host)
+            or not re.fullmatch('[A-Za-z0-9_]{1,128}',name)): return {}
+    loopback=host in ('localhost','127.0.0.1','::1')
+    namespace=len(name)<=64 and re.fullmatch('(?:jsm_)?(?:test|sandbox)(?:_[a-z0-9]+)*',name) is not None
+    descriptor=None
+    if loopback and namespace:
+        descriptor=hashlib.sha256(json.dumps(dict(host=host,db_name=name),sort_keys=True,separators=(',',':')).encode('ascii')).hexdigest()
+    return dict(db_loopback_literal=loopback,db_test_namespace_literal=namespace,db_target_descriptor_sha256=descriptor)
+def _dotenv(text):
+    selected={}; seen=set()
+    for line in text.split('\n'):
+        if line.endswith('\r'): line=line[:-1]
+        if (len(line)>4096 or any(ord(c)<32 and c!='\t' for c in line)
+                or line.rstrip(' \t').endswith('\\')): raise ValueError()
+        line=line.strip(' \t')
+        if not line or line.startswith('#'): continue
+        match=re.match(r'([A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*',line)
+        if not match: raise ValueError()
+        key=match[1]
+        if key in seen: raise ValueError()
+        seen.add(key); value=line[match.end():]
+        if value.startswith(('"',"'")):
+            quote=value[0]; out=''; pos=1
+            while pos<len(value) and value[pos]!=quote:
+                char=value[pos]
+                if char in ('\\','$','`') or ord(char)<32: raise ValueError()
+                out+=char; pos+=1
+            if pos>=len(value): raise ValueError()
+            tail=value[pos+1:]
+            if tail and not re.fullmatch(r'[ \t]+(?:#.*)?',tail): raise ValueError()
+            value=out
+        else:
+            value=re.split(r'[ \t]+#',value,1)[0].rstrip(' \t')
+            if any(c in value for c in ('\\','$','`','"',"'",'#')) or any(c.isspace() for c in value): raise ValueError()
+        if key in ('DB_DSN','DB_HOST','DB_NAME','DB_DATABASE'): selected[key]=value
+    pairs=[]
+    if 'DB_DSN' in selected:
+        pair=_dsn(selected['DB_DSN'])
+        if pair is None: return None
+        pairs.append(pair)
+    hosts=selected.get('DB_HOST'); names=[selected[key] for key in ('DB_NAME','DB_DATABASE') if key in selected]
+    if hosts is not None or names:
+        if hosts is None or not names or len(set(names))!=1: return None
+        pairs.append((hosts,names[0]))
+    return pairs[0] if pairs and all(pair==pairs[0] for pair in pairs) else None
+def _php_tokens(text):
+    # Tokenize boundaries, never execute PHP. Comments/quoted secrets cannot
+    # create keys. Opaque expressions below are skipped, never interpreted.
+    tokens=[]; pos=0; depth=0
+    while pos<len(text):
+        c=text[pos]
+        if c in ' \t\r\n': pos+=1; continue
+        if text.startswith('?>',pos) or text.startswith('#[',pos): raise ValueError()
+        if text.startswith('//',pos) or c=='#':
+            end=text.find('\n',pos); end=len(text) if end<0 else end
+            if '?>' in text[pos:end]: raise ValueError()
+            pos=end+1; continue
+        if text.startswith('/*',pos):
+            end=text.find('*/',pos+2)
+            if end<0: raise ValueError()
+            pos=end+2; continue
+        if text.startswith('<?php',pos):
+            if tokens or (pos+5<len(text) and text[pos+5] not in ' \t\r\n'): raise ValueError()
+            tokens.append(('tag','<?php')); pos+=5
+        elif c in "\"'":
+            quote=c; pos+=1; value=''; dynamic=False
+            while pos<len(text) and text[pos]!=quote:
+                c=text[pos]
+                if ord(c)<32 and c not in '\r\n\t': raise ValueError()
+                if quote=='"' and c=='$': dynamic=True
+                if c=='\\':
+                    pos+=1
+                    if pos>=len(text): raise ValueError()
+                    c=text[pos]
+                    if c in ('\\',quote): value+=c
+                    elif quote=="'": value+='\\'+c
+                    else: dynamic=True; value+='\\'+c
+                else: value+=c
+                pos+=1
+            if pos>=len(text): raise ValueError()
+            tokens.append(('dynamic' if dynamic else 'string',value)); pos+=1
+        elif c.isascii() and (c.isalpha() or c=='_'):
+            end=pos+1
+            while end<len(text) and text[end].isascii() and (text[end].isalnum() or text[end]=='_'): end+=1
+            tokens.append(('word',text[pos:end])); pos=end
+        elif c.isascii() and c.isdigit():
+            end=pos+1
+            while end<len(text) and text[end].isascii() and text[end].isdigit(): end+=1
+            if end-pos>16: raise ValueError()
+            tokens.append(('number',text[pos:end])); pos=end
+        elif text.startswith('=>',pos): tokens.append(('punct','=>')); pos+=2
+        elif c in '[](),;.:?\\$+-*/!<>=&|%':
+            if c in '[(': depth+=1
+            if c in '])': depth-=1
+            if depth<0 or depth>16: raise ValueError()
+            tokens.append(('punct',c)); pos+=1
+        else: raise ValueError()
+        if len(tokens)>8192: raise ValueError()
+    if depth: raise ValueError()
+    return tokens
+def _php_selected(text):
+    tokens=_php_tokens(text); pos=0
+    if tokens and tokens[0][0]=='tag': pos+=1
+    if tokens[pos:pos+1]!=[('word','return')]: raise ValueError()
+    pos+=1
+    targets={():{'components'},('components',):{'db','cache','mailer'},
+             ('components','db'):{'dsn'},('components','cache'):{'class'},('components','mailer'):{'useFileTransport'}}
+    facts={}
+    def expression():
+        nonlocal pos
+        start=pos; stack=[]
+        while pos<len(tokens):
+            kind,value=tokens[pos]
+            if kind=='punct' and not stack and value in (',',']',')',';'): break
+            if kind=='punct' and value in ('[','('): stack.append(']' if value=='[' else ')')
+            elif kind=='punct' and value in (']',')'):
+                if not stack or stack.pop()!=value: raise ValueError()
+            pos+=1
+        if stack or pos==start: raise ValueError()
+        return tokens[start:pos]
+    def array(path):
+        nonlocal pos
+        if pos>=len(tokens): raise ValueError()
+        if tokens[pos]==('punct','['): close=']'; pos+=1
+        elif tokens[pos:pos+2]==[('word','array'),('punct','(')]: close=')'; pos+=2
+        else:
+            if not path: raise ValueError()
+            expression(); return
+        seen=set()
+        while pos<len(tokens) and tokens[pos]!=('punct',close):
+            if tokens[pos][0]!='string' or tokens[pos][1] in seen: raise ValueError()
+            key=tokens[pos][1]; seen.add(key); pos+=1
+            if tokens[pos:pos+1]!=[('punct','=>')]: raise ValueError()
+            pos+=1; child=path+(key,)
+            if key in targets.get(path,set()):
+                if child in targets: array(child)
+                else:
+                    value=expression()
+                    if len(value)==1:
+                        kind,text=value[0]
+                        if kind=='string': facts[child]=text
+                        elif kind=='word' and text.lower() in ('true','false','null'):
+                            facts[child]={'true':True,'false':False,'null':None}[text.lower()]
+            else: expression()
+            if pos<len(tokens) and tokens[pos]==('punct',','): pos+=1
+            elif pos>=len(tokens) or tokens[pos]!=('punct',close): raise ValueError()
+        if pos>=len(tokens): raise ValueError()
+        pos+=1
+    array(())
+    if tokens[pos:]==[('punct',';')]: return facts
+    raise ValueError()
+def _parse_config(raw,profile):
+    result=_config_unknown()
+    try:
+        if type(raw) is not bytes or len(raw)>65536: raise ValueError()
+        text=raw.decode('utf-8')
+        if '\x00' in text or '\r' in text.replace('\r\n',''): raise ValueError()
+        if profile=='dotenv': pair=_dotenv(text)
+        elif profile=='php':
+            values=_php_selected(text); pair=_dsn(values.get(('components','db','dsn')))
+            cache=values.get(('components','cache','class'))
+            mail=values.get(('components','mailer','useFileTransport'))
+            if type(cache) is str: result['cache_filecache_literal']=cache=='yii\\caching\\FileCache'
+            if type(mail) is bool: result['mail_file_transport_literal']=mail
+        else: raise ValueError()
+        result.update(profile_parse='supported',**_db_facts(pair))
+    except (ValueError,UnicodeError,RecursionError): pass
+    return result
 def _tokens(line):
     result=[]; token=''; quote=None; closed=False; escaped=False
     for char in line:
@@ -266,21 +508,47 @@ def _services(deadline):
             process.stdout.close()
 def _observe(nonce):
     deadline=time.monotonic()+3
+    begin=_read_fixed(CURRENT,deadline)
     code=[]; sites=[]; partial=False
     for name,path,size,digest in CODE_FILES:
-        row=_read_fixed(path,deadline); raw=row.pop('raw')
+        row=_read_fixed(path,deadline); raw=row.pop('raw'); row.pop('identity',None)
         hashed=hashlib.sha256(raw).hexdigest() if raw is not None else None
         code.append(dict(row,id=name,sha256=hashed,matches_reviewed=(hashed==digest and len(raw)==size) if raw is not None else None))
         partial=partial or row['read_state'] not in ('ok','absent','not_regular')
     for name,path in SITE_FILES:
-        row=_read_fixed(path,deadline); raw=row.pop('raw'); row.pop('mode')
+        row=_read_fixed(path,deadline); raw=row.pop('raw'); row.pop('identity',None); row.pop('mode')
         parsed,flags=_parse_site(raw) if raw is not None else ('unavailable',{name:None for name in FLAGS})
         sites.append(dict(row,id=name,parse_state=parsed,**flags))
         partial=partial or row['read_state'] not in ('ok','absent','not_regular') or parsed=='unsupported'
+    row=_read_fixed(DEPLOYER[1],deadline); raw=row.pop('raw'); row.pop('identity',None)
+    hashed=hashlib.sha256(raw).hexdigest() if raw is not None else None
+    deployer=dict(row,id=DEPLOYER[0],sha256=hashed,matches_historical=(hashed==DEPLOYER[2]) if raw is not None else None)
+    partial=partial or row['read_state'] not in ('ok','absent','not_regular')
+    bootstrap=[]
+    for name,path in BOOTSTRAP_FILES:
+        row=_read_fixed(path,deadline); raw=row.pop('raw'); row.pop('identity',None)
+        bootstrap.append(dict(row,id=name,sha256=hashlib.sha256(raw).hexdigest() if raw is not None else None,
+            legacy_reference_only_literal_present=b'LEGACY_REFERENCE_ONLY' in raw if raw is not None else None))
+        partial=partial or row['read_state'] not in ('ok','absent','not_regular')
+    configs=[]
+    for name,path,profile in CONFIG_FILES:
+        row=_read_fixed(path,deadline); raw=row.pop('raw')
+        facts=_parse_config(raw,profile) if raw is not None else _config_unknown('unavailable')
+        configs.append(dict(id=name,read_state=row['read_state'],**facts))
+        partial=partial or row['read_state'] not in ('ok','absent','not_regular') or facts['profile_parse']=='unsupported'
+    lock=_metadata_fixed(DEPLOY_LOCK,deadline)
     services=_services(deadline)
-    partial=partial or any('unknown' in (row['load_state'],row['active_state'],row['sub_state']) for row in services)
-    return dict(version='jsm-test-installed-route-v1',nonce=nonce,euid=os.geteuid(),code_files=code,sites=sites,services=services,
-                observation_state='PARTIAL' if partial else 'OBSERVED')
+    end=_read_fixed(CURRENT,deadline)
+    first,last=_deployment_record(begin),_deployment_record(end)
+    stable=None
+    if begin['raw'] is not None and end['raw'] is not None:
+        stable=begin.get('identity') is not None and begin['raw']==end['raw'] and begin['identity']==end.get('identity') and first==last
+    partial=(partial or stable is not True or any(row['sha'] is None or row['deployed_at'] is None for row in (first,last))
+        or lock['read_state'] not in ('ok','absent','not_regular')
+        or any('unknown' in (row['load_state'],row['active_state'],row['sub_state']) for row in services))
+    return dict(version='jsm-test-installed-route-v2',nonce=nonce,euid=os.geteuid(),code_files=code,sites=sites,services=services,
+        configs=configs,bootstrap_files=bootstrap,deployer=deployer,deployment_record_begin=first,deployment_record_end=last,
+        deployment_record_stable=stable,deploy_lock=lock,observation_state='PARTIAL' if partial else 'OBSERVED')
 '''
 
 
@@ -302,6 +570,7 @@ def context_ready(env):
 def remote_program(nonce):
     need(type(nonce) is str and re.fullmatch('[0-9a-f]{32}',nonce), 'NONCE_REQUIRED')
     child = ('CODE_FILES='+repr(CODE_FILES)+'\nSITE_FILES='+repr(SITE_FILES)+'\nUNITS='+repr(UNITS)+'\nFLAGS='+repr(FLAGS)+'\n'
+        + ''.join(name+'='+repr(globals()[name])+'\n' for name in ('CONFIG_FILES','BOOTSTRAP_FILES','DEPLOYER','CURRENT','DEPLOY_LOCK'))
         + _ROOT_LIBRARY + '\nprint(json.dumps(_observe('+repr(nonce)+'),separators=(",",":"),sort_keys=True))\n')
     # OS identity is independent from child data. A missing/refused/malformed
     # child remains unknown, not a false root identity.
@@ -329,8 +598,8 @@ try:
                 try: os.killpg(process.pid,signal.SIGKILL)
                 except OSError: pass
             for key,_ in ready.select(min(.1,max(0,deadline-time.monotonic()-.1))):
-                part=os.read(key.fileobj.fileno(),min(3072,3073-len(raw))); raw.extend(part)
-                if len(raw)>3072: raise ValueError()
+                part=os.read(key.fileobj.fileno(),min(6144,6145-len(raw))); raw.extend(part)
+                if len(raw)>6144: raise ValueError()
                 if not part: eof=True; break
             if eof: break
     remaining=deadline-time.monotonic()-.1
@@ -347,7 +616,7 @@ finally:
                 try: process.wait(timeout=remaining)
                 except subprocess.TimeoutExpired: pass
         process.stdout.close()
-print(json.dumps(dict(version='jsm-test-installed-route-outer-v1',nonce=nonce,principal=principal,euid=euid,
+print(json.dumps(dict(version='jsm-test-installed-route-outer-v2',nonce=nonce,principal=principal,euid=euid,
     root_diagnostic=child),separators=(',',':'),sort_keys=True))
 '''
     return outer.replace('@NONCE@',repr(nonce)).replace('@CHILD@',repr(child)).encode('ascii')
@@ -401,6 +670,60 @@ def _service_record(row, reference):
     return dict(row)
 
 
+def _fingerprint(row, flag):
+    if type(row) is not dict or set(row)!={'id','present','regular','mode','read_state','sha256',flag}: return False
+    if not _metadata(row,mode=True): return False
+    if row['read_state']=='ok':
+        return type(row['sha256']) is str and re.fullmatch('[0-9a-f]{64}',row['sha256']) and type(row[flag]) is bool
+    return row['sha256'] is None and row[flag] is None
+
+
+def _bootstrap_record(row, reference):
+    return dict(row) if _fingerprint(row,'legacy_reference_only_literal_present') else None
+
+
+def _deployer_record(row):
+    if not _fingerprint(row,'matches_historical') or row['id']!=DEPLOYER[0]: return None
+    if row['read_state']=='ok' and row['matches_historical']!=(row['sha256']==DEPLOYER[2]): return None
+    return dict(row)
+
+
+def _config_record(row, reference):
+    keys={'id','read_state','profile_parse','db_loopback_literal','db_test_namespace_literal','db_target_descriptor_sha256',
+          'cache_filecache_literal','mail_file_transport_literal','indirection_or_override'}
+    if type(row) is not dict or set(row)!=keys or row['indirection_or_override']!='UNKNOWN': return None
+    state=row['read_state']; parsed=row['profile_parse']
+    if state not in ('ok','absent','not_regular','unsafe_path','too_large','changed','unreadable','deadline'): return None
+    if parsed not in ('supported','unsupported','unavailable') or (state=='ok')!=(parsed!='unavailable'): return None
+    predicates=('db_loopback_literal','db_test_namespace_literal','cache_filecache_literal','mail_file_transport_literal')
+    if any(value is not None and type(value) is not bool for value in (row[key] for key in predicates)): return None
+    digest=row['db_target_descriptor_sha256']
+    if parsed!='supported' and (any(row[key] is not None for key in predicates) or digest is not None): return None
+    if row['db_loopback_literal'] is True and row['db_test_namespace_literal'] is True:
+        if type(digest) is not str or not re.fullmatch('[0-9a-f]{64}',digest): return None
+    elif digest is not None: return None
+    return dict(row)
+
+
+def _deployment_projection(row):
+    if type(row) is not dict or set(row)!={'read_state','sha','deployed_at'}: return None
+    state=row['read_state']
+    if state not in ('ok','absent','not_regular','unsafe_path','too_large','changed','unreadable','deadline'): return None
+    if state!='ok' and (row['sha'] is not None or row['deployed_at'] is not None): return None
+    if row['sha'] is not None and (type(row['sha']) is not str or not re.fullmatch('[0-9a-f]{40}',row['sha'])): return None
+    stamp=row['deployed_at']
+    if stamp is not None:
+        if type(stamp) is not str or not re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{6})?Z',stamp): return None
+        try: datetime.datetime.fromisoformat(stamp[:-1]+'+00:00')
+        except ValueError: return None
+    return dict(row)
+
+
+def _lock_projection(row):
+    if type(row) is not dict or set(row)!={'present','regular','mode','read_state'} or not _metadata(row,mode=True): return None
+    return dict(row)
+
+
 def _records(rows, references, validator):
     names=[row if type(row) is str else row[0] for row in references]
     if type(rows) is not list or len(rows)!=len(names): return [None]*len(names)
@@ -413,26 +736,41 @@ def _records(rows, references, validator):
 def project_remote(raw, nonce):
     need(type(nonce) is str and re.fullmatch('[0-9a-f]{32}',nonce),'NONCE_REQUIRED')
     try:
-        need(type(raw) is bytes and 0<len(raw)<=4096,'REMOTE_IDENTITY_SCHEMA_REJECTED')
+        need(type(raw) is bytes and 0<len(raw)<=8192,'REMOTE_IDENTITY_SCHEMA_REJECTED')
         outer=strict_json(raw.decode('ascii'))
-        need(_identity(outer,'jsm-test-installed-route-outer-v1',nonce)
+        need(_identity(outer,'jsm-test-installed-route-outer-v2',nonce)
              and set(outer)=={'version','nonce','principal','euid','root_diagnostic'}
              and outer['principal']=='marinagurina','REMOTE_IDENTITY_SCHEMA_REJECTED')
     except Exception: raise Refused('REMOTE_IDENTITY_SCHEMA_REJECTED') from None
     result=dict(ssh_identity=True,ssh_principal='marinagurina',ssh_euid=outer['euid'],sudo_root_identity=None,
-                code_files=[None]*6,sites=[None]*3,services=[None]*4,observation_state='PARTIAL')
+                code_files=[None]*6,sites=[None]*3,services=[None]*4,configs=[None]*7,bootstrap_files=[None]*2,deployer=None,
+                deployment_record_begin=None,deployment_record_end=None,deployment_record_stable=None,deploy_lock=None,observation_state='PARTIAL')
     child=outer['root_diagnostic']
-    if not (_identity(child,'jsm-test-installed-route-v1',nonce)
-            and set(child)=={'version','nonce','euid','code_files','sites','services','observation_state'}): return result
+    if not (_identity(child,'jsm-test-installed-route-v2',nonce)
+            and set(child)=={'version','nonce','euid','code_files','sites','services','observation_state','configs','bootstrap_files','deployer',
+                'deployment_record_begin','deployment_record_end','deployment_record_stable','deploy_lock'}): return result
     result['sudo_root_identity']=child['euid']==0
     if child['euid']!=0: return result
     code=_records(child['code_files'],CODE_FILES,_code_record)
     sites=_records(child['sites'],SITE_FILES,_site_record)
     services=_records(child['services'],UNITS,_service_record)
-    result.update(code_files=code,sites=sites,services=services)
+    configs=_records(child['configs'],CONFIG_FILES,_config_record)
+    bootstrap=_records(child['bootstrap_files'],BOOTSTRAP_FILES,_bootstrap_record)
+    deployer=_deployer_record(child['deployer'])
+    first,last=_deployment_projection(child['deployment_record_begin']),_deployment_projection(child['deployment_record_end'])
+    stable=child['deployment_record_stable']
+    if stable is not None and type(stable) is not bool: stable=None
+    if first is None or last is None or first['read_state']!='ok' or last['read_state']!='ok': stable=None
+    if stable is True and first!=last: stable=None
+    lock=_lock_projection(child['deploy_lock'])
+    result.update(code_files=code,sites=sites,services=services,configs=configs,bootstrap_files=bootstrap,deployer=deployer,
+        deployment_record_begin=first,deployment_record_end=last,deployment_record_stable=stable,deploy_lock=lock)
     complete=(all(row is not None and row['read_state'] in ('ok','absent','not_regular') for row in code)
         and all(row is not None and row['read_state'] in ('ok','absent','not_regular') and row['parse_state']!='unsupported' for row in sites)
-        and all(row is not None and 'unknown' not in (row['load_state'],row['active_state'],row['sub_state']) for row in services))
+        and all(row is not None and 'unknown' not in (row['load_state'],row['active_state'],row['sub_state']) for row in services)
+        and all(row is not None and row['read_state'] in ('ok','absent','not_regular') and row['profile_parse']!='unsupported' for row in configs)
+        and all(row is not None and row['read_state'] in ('ok','absent','not_regular') for row in bootstrap+[deployer,lock])
+        and stable is True and all(row is not None and row['sha'] is not None and row['deployed_at'] is not None for row in (first,last)))
     if complete and child['observation_state']=='OBSERVED': result['observation_state']='OBSERVED'
     return result
 
@@ -466,11 +804,12 @@ def collect(api, env):
             '-o','ServerAliveCountMax=2','-o','LogLevel=ERROR',
             'marinagurina@34.104.157.63','/usr/bin/python3','-I','-B','-S','-']
         budget=min(15,deadline-time.monotonic()-2); need(budget>0,'OVERALL_DEADLINE')
-        code,raw=_at_stage('ssh_transport',_bounded,command,data=remote_program(nonce),limit=4096,timeout=budget)
+        code,raw=_at_stage('ssh_transport',_bounded,command,data=remote_program(nonce),limit=8192,timeout=budget)
         need(code==0,'SSH_TRANSPORT_NOT_CONFIRMED')
         observed=_at_stage('remote_identity',project_remote,raw,nonce)
     complete=observed['observation_state']=='OBSERVED'
-    return dict(observed,status='TEST_INSTALLED_ROUTE_OBSERVED' if complete else 'PARTIAL',
+    return dict(observed,receipt_version='jsm-test-installed-route-v2',serving_php_version=None,
+        db_target_identity='NOT_ESTABLISHED',db_grants='NOT_ESTABLISHED',db_data_provenance='NOT_ESTABLISHED',egress_isolation='NOT_ESTABLISHED',status='TEST_INSTALLED_ROUTE_OBSERVED' if complete else 'PARTIAL',
         reason='FIXED_OBSERVATION_COMPLETE' if complete else 'FIXED_OBSERVATION_INCOMPLETE',failure_stage=None if complete else 'remote_identity',
         resource='gce:dark-berm-508215-d2:asia-northeast1-a:150919059249400713',ip='34.104.157.63',ssh_port=22,
         known_hosts_sha256=PIN_SHA256,reviewed_candidate_sha='779227312a9b5faa20ca9567f97909ae6a8f32fc',
@@ -492,7 +831,8 @@ def main():
         reason=_safe_reason(error)
         stage=getattr(error,'failure_stage','unknown')
         stage=stage if stage in ('policy_repository','policy_environment','policy_branches','ssh_transport','remote_identity') else 'unknown'
-        print(json.dumps(dict(status='BLOCKED',reason=reason,failure_stage=stage,python_version=_python_version(),
+        print(json.dumps(dict(status='BLOCKED',receipt_version='jsm-test-installed-route-v2',reason=reason,failure_stage=stage,python_version=_python_version(),
+            serving_php_version=None,db_target_identity='NOT_ESTABLISHED',db_grants='NOT_ESTABLISHED',db_data_provenance='NOT_ESTABLISHED',egress_isolation='NOT_ESTABLISHED',
             ssh_identity=None,sudo_root_identity=None,installed_release_sha=None,active_include_binding='NOT_ESTABLISHED',
             api302_cause='UNKNOWN',api_health='NOT_TESTED',db_isolation='NOT_ESTABLISHED',provider_requests='NOT_PERFORMED',
             application_execution='NOT_PERFORMED',deploy_acceptance='NOT_ESTABLISHED'),separators=(',',':'),sort_keys=True))
