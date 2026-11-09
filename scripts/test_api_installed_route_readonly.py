@@ -28,6 +28,10 @@ from test_api_readonly_access import TestPolicyApi, PIN_SHA256, private_file, _a
 REPO = 'JSMJapan/jsm-release-control'
 GH_REPO = '/repos/' + REPO
 GH_ENV = GH_REPO + '/environments/test-api-readonly-access'
+# Fixed 8b07cd006859650b35bffee3eda2c5ee07919f1b source scope: 19 SEO + 6 finance files.
+# Frontend root/mapping: storefront infra/sandbox/build/frontend_996_host.py
+# (FRONT and WorkingDirectory guard), frontend_1005_install.py (FRONT / path).
+# These source fingerprints do not establish the running bundle or active release.
 CODE_FILES = (
     ('lot', '/srv/jsm/app/backend/api/modules/v1/controllers/LotController.php', 14918,
      'dc50c9e035e9e1b89b185488e6277bd712194f56b9619c1b8599cf62c471aee1'),
@@ -40,7 +44,45 @@ CODE_FILES = (
     ('snapshot_store', '/srv/jsm/app/backend/common/services/ShopSnapshotStore.php', 4653,
      '7aedffdfa4cba7cb9017df9ccfa4f20f400292a4c435ca3998c8c43d75a6c173'),
     ('amazon_snapshots', '/srv/jsm/app/backend/common/services/shops/Amazon/AmazonSnapshots.php', 6097,
-     '0ce4e8a1ab7dbb634d52172f94e55693ac9db86d0505a9ebbd8c7f0f4b96b5c0'))
+     '0ce4e8a1ab7dbb634d52172f94e55693ac9db86d0505a9ebbd8c7f0f4b96b5c0'),
+    ('seo_article_config', '/srv/jsm/app/frontend/config/articleSeo.js', 14775,
+     '53f21b3177ed7ecb72ee1fc9917a88b271b8d69decc4ace1ae655087064acd26'),
+    ('seo_catalog_config', '/srv/jsm/app/frontend/config/catalogSeo.js', 10698,
+     'c482d771b418872a01f2591befaf7651b004e743e03c8ff9747f18c4ceaadc78'),
+    ('seo_public_data_config', '/srv/jsm/app/frontend/config/publicDataSeo.js', 9478,
+     '2d4d8ecb4ae131a8970776119002becf00eae5c0d4b8f1dc1d88d825dd743096'),
+    ('seo_server', '/srv/jsm/app/frontend/config/server.js', 14304,
+     'b95096ba57ba16090b08e01cf2ae7be30759fabd08d099677191a3a44f79c43d'),
+    ('seo_app', '/srv/jsm/app/frontend/src/App.tsx', 4931,
+     'b4f53741a6a127673e80fa6bbaea461ebce047da8f8f1096f8c16a43bc7c630f'),
+    ('seo_blog_helper', '/srv/jsm/app/frontend/src/helpers/blogArticleSeo.js', 5611,
+     '0b5fb27feecc1311eb89f29b35636a2f3765a49ea49b9fa366e0beff607247ed'),
+    ('seo_public_routes', '/srv/jsm/app/frontend/src/helpers/publicSeoRoutes.js', 5262,
+     'b0c0266de29204ed0645d5aedb31632e5d222e085b5a5ec3edb5a6fdb1bb9d99'),
+    ('seo_blog_article', '/srv/jsm/app/frontend/src/pages/MainFlow/BlogArticle/index.tsx', 7734,
+     '3349f62e1bbd00c4e9fbbeba280f635efcf185a9e12504f2459c29a70206486c'),
+    ('seo_catalog_meta', '/srv/jsm/app/frontend/src/pages/MainFlow/Catalog/components/Meta/index.tsx', 3234,
+     'b17d8951b530159d3e107f00df6b6d887a6bae0d4bed1383eda32be04c7afb06'),
+    ('seo_catalog', '/srv/jsm/app/frontend/src/pages/MainFlow/Catalog/index.tsx', 8736,
+     '06e73efd1e67ac8320a35fe7769489e49095dc9c7d1deeab4fe778171d0183f5'),
+    ('seo_shopping_product', '/srv/jsm/app/frontend/src/pages/MainFlow/Product/ShoppingProduct/index.tsx', 18684,
+     '6fb072438cd9fc3fbc2def9776ca4c2ac2319ed450104cbf157db437ed5e7c99'),
+    ('seo_product_actions', '/srv/jsm/app/frontend/src/redux/asyncActions/productPage.ts', 2448,
+     '65123e884a589603b5ae2f40137cffb13fb828a06584c5135c66d07d8864c56f'),
+    ('seo_common_service', '/srv/jsm/app/frontend/src/services/Common.ts', 5806,
+     '6351a572a142e773489a376196e7c1458fbe7ab43da2feda9db8248323c3f8ef'),
+    ('finance_bonus_controller', '/srv/jsm/app/backend/backend/controllers/BonusReportController.php', 7441,
+     '2978800daa540f9b356d86ac4a59611e04ba55bd00ed94fb7ce13c40bca34b56'),
+    ('finance_bonus_view', '/srv/jsm/app/backend/backend/views/bonus-report/index.php', 13084,
+     'f4729560cf0c09e446312b7724dce8918023dec232ce355b1268871042d7b225'),
+    ('finance_menu_translation', '/srv/jsm/app/backend/common/components/translateAdminMenuRu.php', 5839,
+     '427ab6eedf3e127906e725fc3424dc68d161c14536218c752bb0d1393199d28f'),
+    ('finance_admin_menu', '/srv/jsm/app/backend/common/helper/AdminMenuHelper.php', 25636,
+     '06900cfe86ae01a7b112fb2393d6ece309482c2ca485eef3689a5e235927afe9'),
+    ('finance_period_summary', '/srv/jsm/app/backend/common/helper/BonusPeriodSummary.php', 4762,
+     '6cd3dd42e9c70927ebc156c981d3362071a306c9fe2708f86b5468d125fd58e8'),
+    ('finance_bonus_report', '/srv/jsm/app/backend/common/helper/BonusReport.php', 16551,
+     '18a66be58e71c9609d85c5e16ae90a2f13b24565b8dc83d486fd42e44cb62020'))
 SITE_FILES = (('test_https', '/etc/apache2/sites-available/jsm-sandbox-443.conf'),
               ('test_http', '/etc/apache2/sites-available/jsm-sandbox-80.conf'),
               ('sslip_https', '/etc/apache2/sites-available/jsm-sandbox-sslip-443.conf'))
@@ -599,8 +641,8 @@ try:
                 try: os.killpg(process.pid,signal.SIGKILL)
                 except OSError: pass
             for key,_ in ready.select(min(.1,max(0,deadline-time.monotonic()-.1))):
-                part=os.read(key.fileobj.fileno(),min(6144,6145-len(raw))); raw.extend(part)
-                if len(raw)>6144: raise ValueError()
+                part=os.read(key.fileobj.fileno(),min(12288,12289-len(raw))); raw.extend(part)
+                if len(raw)>12288: raise ValueError()
                 if not part: eof=True; break
             if eof: break
     remaining=deadline-time.monotonic()-.1
@@ -737,14 +779,14 @@ def _records(rows, references, validator):
 def project_remote(raw, nonce):
     need(type(nonce) is str and re.fullmatch('[0-9a-f]{32}',nonce),'NONCE_REQUIRED')
     try:
-        need(type(raw) is bytes and 0<len(raw)<=8192,'REMOTE_IDENTITY_SCHEMA_REJECTED')
+        need(type(raw) is bytes and 0<len(raw)<=16384,'REMOTE_IDENTITY_SCHEMA_REJECTED')
         outer=strict_json(raw.decode('ascii'))
         need(_identity(outer,'jsm-test-installed-route-outer-v2',nonce)
              and set(outer)=={'version','nonce','principal','euid','root_diagnostic'}
              and outer['principal']=='marinagurina','REMOTE_IDENTITY_SCHEMA_REJECTED')
     except Exception: raise Refused('REMOTE_IDENTITY_SCHEMA_REJECTED') from None
     result=dict(ssh_identity=True,ssh_principal='marinagurina',ssh_euid=outer['euid'],sudo_root_identity=None,
-                code_files=[None]*6,sites=[None]*3,services=[None]*4,configs=[None]*7,bootstrap_files=[None]*2,deployer=None,
+                code_files=[None]*25,sites=[None]*3,services=[None]*4,configs=[None]*7,bootstrap_files=[None]*2,deployer=None,
                 deployment_record_begin=None,deployment_record_end=None,deployment_record_stable=None,deploy_lock=None,observation_state='PARTIAL')
     child=outer['root_diagnostic']
     if not (_identity(child,'jsm-test-installed-route-v2',nonce)
@@ -805,7 +847,7 @@ def collect(api, env):
             '-o','ServerAliveCountMax=2','-o','LogLevel=ERROR',
             'marinagurina@34.104.157.63','/usr/bin/python3','-I','-B','-S','-']
         budget=min(15,deadline-time.monotonic()-2); need(budget>0,'OVERALL_DEADLINE')
-        code,raw=_at_stage('ssh_transport',_bounded,command,data=remote_program(nonce),limit=8192,timeout=budget)
+        code,raw=_at_stage('ssh_transport',_bounded,command,data=remote_program(nonce),limit=16384,timeout=budget)
         need(code==0,'SSH_TRANSPORT_NOT_CONFIRMED')
         observed=_at_stage('remote_identity',project_remote,raw,nonce)
     complete=observed['observation_state']=='OBSERVED'
@@ -813,7 +855,7 @@ def collect(api, env):
         db_target_identity='NOT_ESTABLISHED',db_grants='NOT_ESTABLISHED',db_data_provenance='NOT_ESTABLISHED',egress_isolation='NOT_ESTABLISHED',status='TEST_INSTALLED_ROUTE_OBSERVED' if complete else 'PARTIAL',
         reason='FIXED_OBSERVATION_COMPLETE' if complete else 'FIXED_OBSERVATION_INCOMPLETE',failure_stage=None if complete else 'remote_identity',
         resource='gce:dark-berm-508215-d2:asia-northeast1-a:150919059249400713',ip='34.104.157.63',ssh_port=22,
-        known_hosts_sha256=PIN_SHA256,reviewed_candidate_sha='779227312a9b5faa20ca9567f97909ae6a8f32fc',
+        known_hosts_sha256=PIN_SHA256,reviewed_candidate_sha='8b07cd006859650b35bffee3eda2c5ee07919f1b',
         source_sha=env['GITHUB_SHA'],workflow_run_url='https://github.com/'+REPO+'/actions/runs/'+env['GITHUB_RUN_ID'],
         installed_release_sha=None,active_include_binding='NOT_ESTABLISHED',api302_cause='UNKNOWN',api_health='NOT_TESTED',
         db_isolation='NOT_ESTABLISHED',provider_requests='NOT_PERFORMED',application_execution='NOT_PERFORMED',deploy_acceptance='NOT_ESTABLISHED')
