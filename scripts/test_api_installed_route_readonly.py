@@ -111,6 +111,12 @@ LITERAL_SYMBOLS = (
     ('seo_app', ('publicSeoCanonical','publicSeoRoute')),
     ('deployer', ('config/server.js','src/App.tsx','App.tsx','write_text','replace','__gate')))
 
+# Source-expected console runtime binding only; no active alias/current health proof.
+AMAZON_HEALTH = '/srv/jsm/app/backend/console/runtime/amazon-health.json'
+AMAZON_PARAMS = '/srv/jsm/app/backend/api/config/params-local.php'
+EMPTY_SEARCH_REASON = '\u043f\u0443\u0441\u0442\u0430\u044f \u0432\u044b\u0434\u0430\u0447\u0430 (\u0437\u0430\u0441\u0442\u0430\u0432\u043a\u0430 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0438 \u0438\u043b\u0438 \u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u043a\u0430)'
+ERROR_SEARCH_PREFIX = '\u043e\u0448\u0438\u0431\u043a\u0430: '
+
 # Fixed diagnostic definitions; tests execute these same bytes on synthetic
 # owned fixtures. This library has no entry point, input parser or application import.
 _ROOT_LIBRARY = r'''
@@ -346,13 +352,16 @@ def _php_tokens(text):
         if len(tokens)>8192: raise ValueError()
     if depth: raise ValueError()
     return tokens
-def _php_selected(text):
+def _php_selected(text,profile='components'):
     tokens=_php_tokens(text); pos=0
     if tokens and tokens[0][0]=='tag': pos+=1
     if tokens[pos:pos+1]!=[('word','return')]: raise ValueError()
     pos+=1
-    targets={():{'components'},('components',):{'db','cache','mailer'},
-             ('components','db'):{'dsn'},('components','cache'):{'class'},('components','mailer'):{'useFileTransport'}}
+    if profile=='components':
+        targets={():{'components'},('components',):{'db','cache','mailer'},
+                 ('components','db'):{'dsn'},('components','cache'):{'class'},('components','mailer'):{'useFileTransport'}}
+    elif profile=='amazon_params': targets={():{'amazonProxyFile','amazonProxyDailyMb','amazonSnapshots'}}
+    else: raise ValueError()
     facts={}
     def expression():
         nonlocal pos
@@ -389,6 +398,10 @@ def _php_selected(text):
                         if kind=='string': facts[child]=text
                         elif kind=='word' and text.lower() in ('true','false','null'):
                             facts[child]={'true':True,'false':False,'null':None}[text.lower()]
+                        elif profile=='amazon_params' and kind=='number' and re.fullmatch('0|[1-9][0-9]*',text): facts[child]=int(text)
+                    elif (profile=='amazon_params' and len(value)==2 and value[0] in (('punct','-'),('punct','+'))
+                          and value[1][0]=='number' and re.fullmatch('0|[1-9][0-9]*',value[1][1])):
+                        facts[child]=int(value[1][1])*(-1 if value[0][1]=='-' else 1)
             else: expression()
             if pos<len(tokens) and tokens[pos]==('punct',','): pos+=1
             elif pos>=len(tokens) or tokens[pos]!=('punct',close): raise ValueError()
@@ -557,6 +570,58 @@ def _services(deadline):
                 try: process.wait(timeout=.05)
                 except subprocess.TimeoutExpired: pass
             process.stdout.close()
+def _bounded_integer(value,maximum):
+    return value if type(value) is int and 0<=value<=maximum else None
+def _stored_search(raw,state):
+    result=dict(read_state=state,parse_state='unavailable' if raw is None else 'unsupported',
+        meaning='STORED_SEARCH_MONITOR_NOT_B0_OR_CURRENT_PROBE',binding='SOURCE_EXPECTED_NOT_ACTIVE_PROVEN',
+        freshness='STORED_TIMESTAMP_ONLY',fails=None,oks=None,down=None,alerted=None,lastAlert=None,since=None,everOk=None,
+        lastProbe=dict(at=None,ok=None,ms=None,reason_class='UNKNOWN_REDACTED'))
+    if raw is None: return result
+    try:
+        if type(raw) is not bytes or len(raw)>65536: raise ValueError()
+        value=json.loads(raw.decode('utf-8'),object_pairs_hook=_pairs,parse_constant=_invalid)
+        if type(value) is not dict: return result
+        result['parse_state']='supported'
+        for name in ('fails','oks'): result[name]=_bounded_integer(value.get(name),2147483647)
+        for name in ('lastAlert','since'): result[name]=_bounded_integer(value.get(name),4294967295)
+        for name in ('down','alerted','everOk'):
+            if type(value.get(name)) is bool: result[name]=value[name]
+        probe=value.get('lastProbe')
+        if type(probe) is dict:
+            out=result['lastProbe']; out['at']=_bounded_integer(probe.get('at'),4294967295)
+            out['ms']=_bounded_integer(probe.get('ms'),2147483647)
+            if type(probe.get('ok')) is bool: out['ok']=probe['ok']
+            reason=probe.get('reason')
+            if reason=='': out['reason_class']='NONE'
+            elif reason==EMPTY_SEARCH_REASON: out['reason_class']='EMPTY_OR_CHALLENGE'
+            elif type(reason) is str and reason.startswith(ERROR_SEARCH_PREFIX): out['reason_class']='ERROR_DETAILS_REDACTED'
+    except (ValueError,UnicodeError,RecursionError): pass
+    return result
+def _amazon_params(raw,state):
+    result=dict(read_state=state,profile_parse='unavailable' if raw is None else 'unsupported',
+        meaning='LITERAL_PARAMETERS_NOT_EFFECTIVE_CONFIG',proxy_file_nonempty=None,proxy_file_location_kind='UNKNOWN',
+        snapshots_literal=None,budget_positive_literal=None,indirection_or_override='UNKNOWN')
+    if raw is None: return result
+    try:
+        if type(raw) is not bytes or len(raw)>65536: raise ValueError()
+        text=raw.decode('utf-8')
+        if '\x00' in text or '\r' in text.replace('\r\n',''): raise ValueError()
+        values=_php_selected(text,'amazon_params'); result['profile_parse']='supported'
+        filename=values.get(('amazonProxyFile',))
+        if type(filename) is str:
+            result['proxy_file_nonempty']=bool(filename)
+            kind='OTHER_LITERAL'
+            if not filename: kind='EMPTY_LITERAL'
+            elif re.fullmatch('/[A-Za-z0-9._/-]+',filename) and not filename.startswith('//'): kind='ABSOLUTE_PATH_LITERAL'
+            elif re.fullmatch('@[A-Za-z0-9._/-]+',filename): kind='YII_ALIAS_LITERAL'
+            elif re.fullmatch('[A-Za-z0-9._-][A-Za-z0-9._/-]*',filename): kind='RELATIVE_PATH_LITERAL'
+            result['proxy_file_location_kind']=kind
+        snapshots=values.get(('amazonSnapshots',)); budget=values.get(('amazonProxyDailyMb',))
+        if type(snapshots) is bool: result['snapshots_literal']=snapshots
+        if type(budget) is int: result['budget_positive_literal']=budget>0
+    except (ValueError,UnicodeError,RecursionError): pass
+    return result
 def _literal_presence(name,raw,state):
     symbols=dict(LITERAL_SYMBOLS)[name]
     return dict(id=name,read_state=state,meaning='BYTE_LITERAL_PRESENCE_ONLY',
@@ -593,6 +658,10 @@ def _observe(nonce):
         facts=_parse_config(raw,profile) if raw is not None else _config_unknown('unavailable')
         configs.append(dict(id=name,read_state=row['read_state'],**facts))
         partial=partial or row['read_state'] not in ('ok','absent','not_regular') or facts['profile_parse']=='unsupported'
+    row=_read_fixed(AMAZON_HEALTH,deadline)
+    stored_search=_stored_search(row['raw'],row['read_state'])
+    row=_read_fixed(AMAZON_PARAMS,deadline)
+    amazon_params=_amazon_params(row['raw'],row['read_state'])
     lock=_metadata_fixed(DEPLOY_LOCK,deadline)
     services=_services(deadline)
     end=_read_fixed(CURRENT,deadline)
@@ -600,10 +669,12 @@ def _observe(nonce):
     stable=None
     if begin['raw'] is not None and end['raw'] is not None:
         stable=begin.get('identity') is not None and begin['raw']==end['raw'] and begin['identity']==end.get('identity') and first==last
-    partial=(partial or stable is not True or any(row['sha'] is None or row['deployed_at'] is None for row in (first,last))
+    partial=(partial or stored_search['read_state'] not in ('ok','absent','not_regular') or stored_search['parse_state']=='unsupported'
+        or amazon_params['read_state'] not in ('ok','absent','not_regular') or amazon_params['profile_parse']=='unsupported' or stable is not True or any(row['sha'] is None or row['deployed_at'] is None for row in (first,last))
         or lock['read_state'] not in ('ok','absent','not_regular')
         or any('unknown' in (row['load_state'],row['active_state'],row['sub_state']) for row in services))
     return dict(version='jsm-test-installed-route-v2',nonce=nonce,euid=os.geteuid(),code_files=code,sites=sites,services=services,
+        stored_amazon_search=stored_search,amazon_literal_params=amazon_params,
         code_literal_presence=[literals[name] for name,_ in LITERAL_SYMBOLS],
         configs=configs,bootstrap_files=bootstrap,deployer=deployer,deployment_record_begin=first,deployment_record_end=last,
         deployment_record_stable=stable,deploy_lock=lock,observation_state='PARTIAL' if partial else 'OBSERVED')
@@ -628,7 +699,8 @@ def context_ready(env):
 def remote_program(nonce):
     need(type(nonce) is str and re.fullmatch('[0-9a-f]{32}',nonce), 'NONCE_REQUIRED')
     child = ('CODE_FILES='+repr(CODE_FILES)+'\nSITE_FILES='+repr(SITE_FILES)+'\nUNITS='+repr(UNITS)+'\nFLAGS='+repr(FLAGS)+'\n'
-        + ''.join(name+'='+repr(globals()[name])+'\n' for name in ('CONFIG_FILES','BOOTSTRAP_FILES','DEPLOYER','CURRENT','DEPLOY_LOCK','LITERAL_SYMBOLS'))
+        + ''.join(name+'='+ascii(globals()[name])+'\n' for name in ('CONFIG_FILES','BOOTSTRAP_FILES','DEPLOYER','CURRENT','DEPLOY_LOCK','LITERAL_SYMBOLS',
+            'AMAZON_HEALTH','AMAZON_PARAMS','EMPTY_SEARCH_REASON','ERROR_SEARCH_PREFIX'))
         + _ROOT_LIBRARY + '\nprint(json.dumps(_observe('+repr(nonce)+'),separators=(",",":"),sort_keys=True))\n')
     # OS identity is independent from child data. A missing/refused/malformed
     # child remains unknown, not a false root identity.
@@ -782,6 +854,50 @@ def _lock_projection(row):
     return dict(row)
 
 
+def _new_profile_state(row, name):
+    state=row['read_state']; parsed=row[name]
+    return (state in ('ok','absent','not_regular','unsafe_path','too_large','changed','unreadable','deadline')
+        and parsed in ('supported','unsupported','unavailable') and (state=='ok')==(parsed!='unavailable'))
+
+
+def _bounded_or_unknown(value, maximum):
+    return value is None or (type(value) is int and 0<=value<=maximum)
+
+
+def _stored_search_record(row):
+    keys={'read_state','parse_state','meaning','binding','freshness','fails','oks','down','alerted','lastAlert','since','everOk','lastProbe'}
+    if type(row) is not dict or set(row)!=keys or not _new_profile_state(row,'parse_state'): return None
+    if (row['meaning']!='STORED_SEARCH_MONITOR_NOT_B0_OR_CURRENT_PROBE' or row['binding']!='SOURCE_EXPECTED_NOT_ACTIVE_PROVEN'
+            or row['freshness']!='STORED_TIMESTAMP_ONLY'): return None
+    probe=row['lastProbe']
+    if type(probe) is not dict or set(probe)!={'at','ok','ms','reason_class'}: return None
+    if probe['reason_class'] not in ('NONE','EMPTY_OR_CHALLENGE','ERROR_DETAILS_REDACTED','UNKNOWN_REDACTED'): return None
+    if any(not _bounded_or_unknown(row[key],2147483647) for key in ('fails','oks')): return None
+    if any(not _bounded_or_unknown(row[key],4294967295) for key in ('lastAlert','since')): return None
+    if not _bounded_or_unknown(probe['at'],4294967295) or not _bounded_or_unknown(probe['ms'],2147483647): return None
+    if any(value is not None and type(value) is not bool for value in [row['down'],row['alerted'],row['everOk'],probe['ok']]): return None
+    if row['parse_state']!='supported':
+        if (any(row[key] is not None for key in ('fails','oks','down','alerted','lastAlert','since','everOk'))
+                or any(probe[key] is not None for key in ('at','ok','ms')) or probe['reason_class']!='UNKNOWN_REDACTED'): return None
+    return dict(row,lastProbe=dict(probe))
+
+
+def _amazon_params_record(row):
+    keys={'read_state','profile_parse','meaning','proxy_file_nonempty','proxy_file_location_kind','snapshots_literal',
+          'budget_positive_literal','indirection_or_override'}
+    if type(row) is not dict or set(row)!=keys or not _new_profile_state(row,'profile_parse'): return None
+    if row['meaning']!='LITERAL_PARAMETERS_NOT_EFFECTIVE_CONFIG' or row['indirection_or_override']!='UNKNOWN': return None
+    for key in ('proxy_file_nonempty','snapshots_literal','budget_positive_literal'):
+        if row[key] is not None and type(row[key]) is not bool: return None
+    kind=row['proxy_file_location_kind']; nonempty=row['proxy_file_nonempty']
+    if kind not in ('ABSOLUTE_PATH_LITERAL','RELATIVE_PATH_LITERAL','YII_ALIAS_LITERAL','EMPTY_LITERAL','OTHER_LITERAL','UNKNOWN'): return None
+    if ((nonempty is None and kind!='UNKNOWN') or (nonempty is False and kind!='EMPTY_LITERAL')
+            or (nonempty is True and kind in ('EMPTY_LITERAL','UNKNOWN'))): return None
+    if row['profile_parse']!='supported' and (any(row[key] is not None for key in ('proxy_file_nonempty','snapshots_literal','budget_positive_literal'))
+            or kind!='UNKNOWN'): return None
+    return dict(row)
+
+
 def _literal_record(row, reference):
     if type(row) is not dict or set(row)!={'id','read_state','meaning','flags'}: return None
     if row['meaning']!='BYTE_LITERAL_PRESENCE_ONLY': return None
@@ -813,12 +929,13 @@ def project_remote(raw, nonce):
              and outer['principal']=='marinagurina','REMOTE_IDENTITY_SCHEMA_REJECTED')
     except Exception: raise Refused('REMOTE_IDENTITY_SCHEMA_REJECTED') from None
     result=dict(ssh_identity=True,ssh_principal='marinagurina',ssh_euid=outer['euid'],sudo_root_identity=None,
-                code_literal_presence=[None]*3,code_files=[None]*25,sites=[None]*3,services=[None]*4,configs=[None]*7,bootstrap_files=[None]*2,deployer=None,
+                stored_amazon_search=None,amazon_literal_params=None,code_literal_presence=[None]*3,code_files=[None]*25,sites=[None]*3,services=[None]*4,configs=[None]*7,bootstrap_files=[None]*2,deployer=None,
                 deployment_record_begin=None,deployment_record_end=None,deployment_record_stable=None,deploy_lock=None,observation_state='PARTIAL')
     child=outer['root_diagnostic']
     if not (_identity(child,'jsm-test-installed-route-v2',nonce)
             and set(child)=={'version','nonce','euid','code_files','sites','services','observation_state','configs','bootstrap_files','deployer',
-                'deployment_record_begin','deployment_record_end','deployment_record_stable','deploy_lock','code_literal_presence'}): return result
+                'deployment_record_begin','deployment_record_end','deployment_record_stable','deploy_lock','code_literal_presence',
+                'stored_amazon_search','amazon_literal_params'}): return result
     result['sudo_root_identity']=child['euid']==0
     if child['euid']!=0: return result
     code=_records(child['code_files'],CODE_FILES,_code_record)
@@ -839,9 +956,14 @@ def project_remote(raw, nonce):
     if first is None or last is None or first['read_state']!='ok' or last['read_state']!='ok': stable=None
     if stable is True and first!=last: stable=None
     lock=_lock_projection(child['deploy_lock'])
-    result.update(code_literal_presence=literals,code_files=code,sites=sites,services=services,configs=configs,bootstrap_files=bootstrap,deployer=deployer,
+    stored_search=_stored_search_record(child['stored_amazon_search'])
+    amazon_params=_amazon_params_record(child['amazon_literal_params'])
+    result.update(stored_amazon_search=stored_search,amazon_literal_params=amazon_params,code_literal_presence=literals,code_files=code,sites=sites,services=services,configs=configs,bootstrap_files=bootstrap,deployer=deployer,
         deployment_record_begin=first,deployment_record_end=last,deployment_record_stable=stable,deploy_lock=lock)
-    complete=(all(row is not None for row in literals)
+    complete=(stored_search is not None and amazon_params is not None
+        and stored_search['read_state'] in ('ok','absent','not_regular') and stored_search['parse_state']!='unsupported'
+        and amazon_params['read_state'] in ('ok','absent','not_regular') and amazon_params['profile_parse']!='unsupported'
+        and all(row is not None for row in literals)
         and all(row is not None and row['read_state'] in ('ok','absent','not_regular') for row in code)
         and all(row is not None and row['read_state'] in ('ok','absent','not_regular') and row['parse_state']!='unsupported' for row in sites)
         and all(row is not None and 'unknown' not in (row['load_state'],row['active_state'],row['sub_state']) for row in services)
