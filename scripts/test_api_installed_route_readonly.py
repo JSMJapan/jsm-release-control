@@ -702,6 +702,13 @@ def remote_program(nonce):
         + ''.join(name+'='+ascii(globals()[name])+'\n' for name in ('CONFIG_FILES','BOOTSTRAP_FILES','DEPLOYER','CURRENT','DEPLOY_LOCK','LITERAL_SYMBOLS',
             'AMAZON_HEALTH','AMAZON_PARAMS','EMPTY_SEARCH_REASON','ERROR_SEARCH_PREFIX'))
         + _ROOT_LIBRARY + '\nprint(json.dumps(_observe('+repr(nonce)+'),separators=(",",":"),sort_keys=True))\n')
+    return wrap_root_program(nonce, child)
+
+
+def wrap_root_program(nonce, child):
+    """Existing bounded sudo capsule, shared by fixed source-only profiles."""
+    need(type(nonce) is str and re.fullmatch('[0-9a-f]{32}',nonce), 'NONCE_REQUIRED')
+    need(type(child) is str and 0<len(child)<=131072 and child.isascii(), 'REMOTE_IDENTITY_SCHEMA_REJECTED')
     # OS identity is independent from child data. A missing/refused/malformed
     # child remains unknown, not a false root identity.
     outer = r'''
