@@ -4,6 +4,49 @@
 Подготовка кода разрешена [решением владельца](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7030574514). Это не разрешение запуска.
 Основа: control main `0f32c5cba72acdc5e9b17579a7ce72b4438012f6`.
 
+## План минимального source-only ремонта после one-shot
+
+Основа ремонта `6f6a0efdcfea0e5b907b3f9978fc59f731ce1a99`,
+[record7035066291](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7035066291).
+One-shot44705731325 израсходован; этот план не разрешает новый runtime.
+
+- [x] RED: synthetic namespace mismatch + refused Unix parser показывает
+  skipped/attempted ambiguity; independent fixed socket/datadir metadata
+  должны оставаться наблюдаемыми внутри прежнего3с budget.
+- [x] Изменить только `test_db_os_metadata.py`, strict projection в
+  `test_db_metadata_readonly.py` и их existing tests: fixed ordered stage IDs,
+  attempted/completed booleans +closed error enums; separate already-read
+  net/mnt booleans и validated load/active/pid_available. Versioned v2 schema,
+  no raw errors/paths/PIDs, no new paths/properties/commands/credentials.
+- [x] GREEN/adversarial: отказы всех18 fixed stages не дают fake complete, deadline
+  не допускает новых syscall после budget; namespace mismatch не допускается
+  для FD ownership. Старый installed-route payload invariant, original
+  transport/complete/SQL admission guards остаются проверены existing tests.
+- [ ] Normal push/draft PR, exact-head two non-author reviews +offline CI.
+  Отдельный будущий owner run approval остаётся обязательным.
+
+v1 one-shot44705731325 дал SSH/root OBSERVED, Apache/PHP exe match +combined
+namespace mismatch, остальные metadata UNKNOWN; global early refusal не
+различал skipped и attempted. v2 добавляет18 фиксированных stage records:
+`attempted/completed` — boolean, `error` — закрытый enum без raw exception.
+Attempt означает вход в прежний фиксированный probe, не успешное чтение.
+`completed=false`/UNKNOWN не означают отсутствия сервиса/сокета/каталога.
+`net_namespace_matches` и `mount_namespace_matches` лишь разделяют уже
+прочитанное сравнение; combined namespace acceptance не меняется.
+Validated unit load/active/pid_available не содержат raw PID или unit config.
+Отказ Unix read/parser не блокирует независимые уже разрешённые filesystem
+socket/datadir metadata, пока не истёк прежний budget. Связь listener/FD при
+неизвестном Unix snapshot или namespace mismatch не утверждается.
+Первый repair chunk:176 local tests,173 PASS+3 SKIP. Frozen repair:179 local
+tests,176 PASS+3 SKIP; все18 actual-observer stage refusal packets проходят
+strict v2 projection как PARTIAL. Проверены full/namespace-partial packet и
+противоречие attempted=true/error=NOT_ATTEMPTED (отклоняется).
+Новый v2 runtime NOT_RUN; exact frozen CI и два non-author reviews ещё gates.
+`pid_available` означает только валидный positive MainPID, не service health.
+`STABILITY_NOT_CONFIRMED` не утверждает изменение процесса/объекта;
+`DEADLINE` различается attempted flag до/после входа в probe. Отсутствующий
+dependency не выдаётся за наблюдённое изменение filesystem/listener.
+
 **SCOPE PREPARED / DB PROOF BLOCKED_TARGET_ADMISSION / SQL_NOT_ATTEMPTED.**
 Кандидат содержит фиксированное OS-наблюдение: три фиксированных
 systemd MainPID, ожидаемые exe/net/mnt namespaces, bounded FD/socket relationships
@@ -11,7 +54,8 @@ systemd MainPID, ожидаемые exe/net/mnt namespaces, bounded FD/socket re
 из OS metadata, без SQL/конфигурации/учётных данных/содержимого datadir.
 Существующий защищённый GitHub/key-only транспорт переносит этот capsule без
 установки файлов на TEST. Это подготовка phase1 OS evidence, не готовая
-диагностика БД и не разрешение запуска. Actual TEST observation ещё NOT_RUN.
+диагностика БД и не разрешение запуска. v1 one-shot PARTIAL описан выше;
+новая v2 observation ещё NOT_RUN.
 
 Это намеренно не SQL-runner. Нет текущего независимого доверенного baseline,
 который разрешал бы подключение. Код не принимает runtime baseline, DSN, пути,
@@ -160,7 +204,9 @@ NOT_ESTABLISHED. Synthetic provenance и egress требуют отдельны�
 
 Baseline base0f32: 141 тест, 138 PASS +3 explicit SKIP на этом Mac:
 2 private opt-ins и Linux-only O_NOATIME syscall proof. Новый полный локальный
-run: 170 тестов, 167 PASS + те же3 SKIP; actual DB/runtime не запускались.
+run исходного phase1:170 тестов,167 PASS +те же3 SKIP. Actual v1 OS-only
+one-shot выполнен отдельно; SQL/application/DB credentials не использовались.
+Current v2 repair local:179 тестов,176 PASS +те же3 SKIP, новый runtime NOT_RUN.
 Новые офлайн adversarial проверки ловят forged env baseline/SQL/DSN, actor/ref/
 attempt/workflow drift, policy/owner/branch drift, private exception leakage и
 продвижение неподтверждённых полей до DB proof. Проверены actual bounded reader

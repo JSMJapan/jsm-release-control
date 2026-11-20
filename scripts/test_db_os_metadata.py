@@ -5,7 +5,15 @@ variable paths contain typed systemd MainPIDs or bounded numeric FD names.
 Raw process links, mount paths and socket-table entries never leave the child.
 """
 
-LIBRARY = r'''
+STAGE_IDS = ('units_begin','apache_process_begin','php_process_begin','mysql_process_begin',
+    'unix_begin','php_socket_begin','mysql_socket_begin','datadir_begin','mount_begin',
+    'units_end','unix_end','apache_process_end','php_process_end','mysql_process_end',
+    'php_socket_end','mysql_socket_end','datadir_end','mount_end')
+STAGE_ERRORS = ('NONE','NOT_ATTEMPTED','DEPENDENCY_UNAVAILABLE','UNIT_UNAVAILABLE','PID_UNAVAILABLE',
+    'NAMESPACE_MISMATCH','EXE_MISMATCH','UNAVAILABLE_OR_REFUSED','DEADLINE','OS_REFUSED',
+    'PARSE_OR_GUARD_REFUSED','SUBPROCESS_REFUSED','INCONSISTENT','STABILITY_NOT_CONFIRMED','UNSUPPORTED_LAYOUT')
+
+LIBRARY = 'STAGE_IDS='+repr(STAGE_IDS)+'\n'+r'''
 import hashlib,json,os,re,selectors,signal,stat,subprocess,time
 ROLES=('apache','php','mysql')
 UNITS={'apache':'apache2.service','php':'php7.4-fpm.service','mysql':'mysql.service'}
@@ -133,7 +141,8 @@ def _fd_sockets(pid,deadline):
         if fd is not None:os.close(fd)
         for directory in reversed(fds):os.close(directory)
 def _proc_snapshot(role,pid,deadline):
-    result=dict(state='unknown',start=None,exe_matches=None,namespace_matches=None,sockets=set())
+    result=dict(state='unknown',start=None,exe_matches=None,namespace_matches=None,
+        net_namespace_matches=None,mount_namespace_matches=None,sockets=set())
     try:
         if role not in ROLES or not _pid_ready(pid):return result
         prefix='/proc/'+str(pid);own='/proc/'+str(os.getpid())
@@ -144,6 +153,7 @@ def _proc_snapshot(role,pid,deadline):
         for namespace in ('net','mnt'):
             observed=_readlink(prefix+'/ns/'+namespace,deadline);observer=_readlink(own+'/ns/'+namespace,deadline)
             if not re.fullmatch(namespace+r':\[[0-9]{1,20}\]',observed) or not re.fullmatch(namespace+r':\[[0-9]{1,20}\]',observer):raise ValueError()
+            result['net_namespace_matches' if namespace=='net' else 'mount_namespace_matches']=observed==observer
             same=same and observed==observer
         result['namespace_matches']=same
         if not result['exe_matches'] or not same:return result
@@ -230,65 +240,115 @@ def _mount_snapshot(device,deadline):
 def _observe(nonce):
     if type(nonce)is not str or not re.fullmatch('[0-9a-f]{32}',nonce):raise ValueError()
     deadline=time.monotonic()+3
-    result=dict(version='jsm-test-db-os-2760-v1',nonce=nonce,euid=os_geteuid(),observation_state='PARTIAL',
-        processes=[dict(id=r,state='unknown',exe_matches=None,namespace_matches=None,stable=None) for r in ROLES],
+    result=dict(version='jsm-test-db-os-2760-v2',nonce=nonce,euid=os_geteuid(),observation_state='PARTIAL',
+        processes=[dict(id=r,state='unknown',exe_matches=None,namespace_matches=None,stable=None,
+            net_namespace_matches=None,mount_namespace_matches=None,
+            load_state=None,active_state=None,pid_available=None) for r in ROLES],
         sockets=[dict(id=r,state='unknown',is_socket=None,kernel_listener=None,owned_by_service_mainpid=None) for r in ('php','mysql')],
         datadir=dict(state='unknown',is_directory=None,filesystem='unknown',device_matches=None),
+        stages=[dict(id=s,attempted=False,completed=False,error='NOT_ATTEMPTED') for s in STAGE_IDS],
         effective_api_binding='NOT_ESTABLISHED',test_disk_identity='NOT_ESTABLISHED',db_proof='BLOCKED_TARGET_ADMISSION',sql='NOT_ATTEMPTED')
     if result['euid']!=0:return result
-    observed={};first=None;last=None;unix={};socket_metadata={};mount=None
-    try:
-        first=_unit_snapshot(deadline)
-        for role,row in zip(ROLES,result['processes']):
-            unit=first[role]
-            if unit['load']!='loaded' or unit['active']!='active' or not _pid_ready(unit['pid']):continue
-            proc=_proc_snapshot(role,unit['pid'],deadline);observed[role]=proc
-            row.update(state=proc['state'],exe_matches=proc['exe_matches'],namespace_matches=proc['namespace_matches'])
-        unix=_unix_snapshot(deadline)
-        for role,row in zip(('php','mysql'),result['sockets']):
-            fs=_socket_metadata(role,deadline);socket_metadata[role]=fs
-            row.update(state=fs['state'],is_socket=fs['is_socket'])
-            inode=unix.get(role);row['kernel_listener']=inode is not None
-            proc=observed.get(role)
-            if fs['is_socket'] is True and inode is not None and proc and proc['state']=='observed':
-                row['owned_by_service_mainpid']=inode in proc['sockets']
-        directory=_datadir_metadata(deadline)
+    stages={r['id']:r for r in result['stages']}
+    def skip(name,error):stages[name]['error']=error
+    def run(name,read):
+        stage=stages[name]
+        if time.monotonic()>=deadline:
+            stage['error']='DEADLINE';return None
+        stage['attempted']=True
+        try:
+            value=read();stage.update(completed=True,error='NONE')
+            if type(value)is dict and value.get('state')=='unknown':
+                error=('NAMESPACE_MISMATCH' if value.get('namespace_matches')is False else
+                    'EXE_MISMATCH' if value.get('exe_matches')is False else 'UNAVAILABLE_OR_REFUSED')
+                stage.update(completed=False,error=error)
+            elif type(value)is dict and value.get('filesystem')=='unsupported':
+                stage.update(completed=False,error='UNSUPPORTED_LAYOUT')
+            return value
+        except (OSError,ValueError,UnicodeError,subprocess.SubprocessError) as error:
+            code=('DEADLINE' if time.monotonic()>=deadline else
+                'OS_REFUSED' if isinstance(error,OSError) else
+                'SUBPROCESS_REFUSED' if isinstance(error,subprocess.SubprocessError) else 'PARSE_OR_GUARD_REFUSED')
+            stage.update(completed=False,error=code)
+            return None
+    def unconfirmed(name,error='STABILITY_NOT_CONFIRMED'):
+        if stages[name]['attempted']:stages[name].update(completed=False,error=error)
+    observed={};socket_metadata={};mount=None
+    first=run('units_begin',lambda:_unit_snapshot(deadline))
+    for role,row in zip(ROLES,result['processes']):
+        name=role+'_process_begin'
+        if first is None:skip(name,'DEPENDENCY_UNAVAILABLE');continue
+        unit=first[role]
+        row.update(load_state=unit['load'],active_state=unit['active'],pid_available=_pid_ready(unit['pid']))
+        if unit['load']!='loaded' or unit['active']!='active':skip(name,'UNIT_UNAVAILABLE');continue
+        if not _pid_ready(unit['pid']):skip(name,'PID_UNAVAILABLE');continue
+        proc=run(name,lambda:_proc_snapshot(role,unit['pid'],deadline));observed[role]=proc
+        if proc is not None:
+            row.update({k:proc[k] for k in ('state','exe_matches','namespace_matches','net_namespace_matches','mount_namespace_matches')})
+    unix=run('unix_begin',lambda:_unix_snapshot(deadline))
+    for role,row in zip(('php','mysql'),result['sockets']):
+        fs=run(role+'_socket_begin',lambda:_socket_metadata(role,deadline));socket_metadata[role]=fs
+        if fs is not None:row.update(state=fs['state'],is_socket=fs['is_socket'])
+        inode=unix.get(role) if unix is not None else None
+        row['kernel_listener']=(inode is not None) if unix is not None else None
+        proc=observed.get(role)
+        if fs is not None and fs['is_socket'] is True and inode is not None and proc and proc['state']=='observed':
+            row['owned_by_service_mainpid']=inode in proc['sockets']
+    directory=run('datadir_begin',lambda:_datadir_metadata(deadline))
+    if directory is not None:
         result['datadir'].update(state=directory['state'],is_directory=directory['is_directory'])
         if directory['state']=='observed':
-            mount=_mount_snapshot(directory['device'],deadline)
-            result['datadir'].update({k:mount[k] for k in ('state','filesystem','device_matches')})
-        last=_unit_snapshot(deadline)
-        last_unix=_unix_snapshot(deadline)
-        for role,row in zip(ROLES,result['processes']):
-            proc=observed.get(role)
-            again=(_proc_snapshot(role,first[role]['pid'],deadline)
-                if proc and proc['state']=='observed' and first==last else None)
-            stable=(first==last and proc is not None and proc['state']=='observed'
-                and again is not None and again['state']=='observed' and again['start']==proc['start']
-                and again['exe_matches'] is True and again['namespace_matches'] is True
-                and _proc_still_same(role,first[role]['pid'],proc['start'],deadline))
-            row['stable']=stable if proc and proc['state']=='observed' else None
-            if not stable:
-                row['state']='unknown'
-                for socket in result['sockets']:
-                    if socket['id']==role:socket['owned_by_service_mainpid']=None
-            elif role in SOCKETS:
-                fs_again=_socket_metadata(role,deadline)
-                old=socket_metadata[role];inode=unix.get(role)
-                same=(old==fs_again and inode is not None and last_unix.get(role)==inode
-                    and (inode in proc['sockets'])==(inode in again['sockets']))
-                if not same:
-                    for socket in result['sockets']:
-                        if socket['id']==role:socket.update(state='unknown',owned_by_service_mainpid=None)
-        directory_again=_datadir_metadata(deadline)
-        if directory!=directory_again or (mount is not None and mount!=_mount_snapshot(directory_again['device'],deadline)):
-            result['datadir']=dict(state='unknown',is_directory=None,filesystem='unknown',device_matches=None)
-        if (all(r['state']=='observed' and r['stable'] is True for r in result['processes'])
-                and all(r['owned_by_service_mainpid'] is True for r in result['sockets'])
-                and result['datadir']==dict(state='observed',is_directory=True,filesystem='local_block',device_matches=True)):
-            result['observation_state']='OBSERVED'
-    except (OSError,ValueError,UnicodeError,subprocess.SubprocessError):
-        for row in result['processes']:row.update(state='unknown',stable=None)
-        for row in result['sockets']:row['owned_by_service_mainpid']=None
+            mount=run('mount_begin',lambda:_mount_snapshot(directory['device'],deadline))
+            if mount is not None:result['datadir'].update({k:mount[k] for k in ('state','filesystem','device_matches')})
+        else:skip('mount_begin','DEPENDENCY_UNAVAILABLE')
+    else:skip('mount_begin','DEPENDENCY_UNAVAILABLE')
+    last=run('units_end',lambda:_unit_snapshot(deadline))
+    if first is not None and last is not None and first!=last:unconfirmed('units_end','INCONSISTENT')
+    last_unix=run('unix_end',lambda:_unix_snapshot(deadline))
+    for role,row in zip(ROLES,result['processes']):
+        name=role+'_process_end';proc=observed.get(role)
+        if proc and proc['state']=='observed' and first==last:
+            again=run(name,lambda:_proc_snapshot(role,first[role]['pid'],deadline))
+        else:skip(name,'DEPENDENCY_UNAVAILABLE');again=None
+        stable=(first is not None and first==last and proc is not None and proc['state']=='observed'
+            and again is not None and again['state']=='observed' and again['start']==proc['start']
+            and again['exe_matches'] is True and again['namespace_matches'] is True
+            and time.monotonic()<deadline and _proc_still_same(role,first[role]['pid'],proc['start'],deadline))
+        row['stable']=stable if proc and proc['state']=='observed' else None
+        if not stable:
+            row['state']='unknown'
+            if again is not None and stages[name]['completed']:
+                unconfirmed(name,'DEADLINE' if time.monotonic()>=deadline else 'STABILITY_NOT_CONFIRMED')
+            for socket in result['sockets']:
+                if socket['id']==role:socket['owned_by_service_mainpid']=None
+        if role not in SOCKETS:continue
+        socket_name=role+'_socket_end'
+        if not stable:skip(socket_name,'DEPENDENCY_UNAVAILABLE');continue
+        fs_again=run(socket_name,lambda:_socket_metadata(role,deadline))
+        old=socket_metadata[role];inode=unix.get(role) if unix is not None else None
+        same=(old is not None and fs_again is not None and old==fs_again and inode is not None
+            and last_unix is not None and last_unix.get(role)==inode
+            and (inode in proc['sockets'])==(inode in again['sockets']))
+        if not same:
+            if fs_again is not None and stages[socket_name]['completed']:
+                unconfirmed(socket_name,'DEPENDENCY_UNAVAILABLE' if old is None or unix is None or last_unix is None
+                    else 'STABILITY_NOT_CONFIRMED')
+            for socket in result['sockets']:
+                if socket['id']==role:socket.update(state='unknown',owned_by_service_mainpid=None)
+    directory_again=run('datadir_end',lambda:_datadir_metadata(deadline))
+    mount_again=None
+    if mount is not None and directory_again is not None and directory_again['state']=='observed':
+        mount_again=run('mount_end',lambda:_mount_snapshot(directory_again['device'],deadline))
+    else:skip('mount_end','DEPENDENCY_UNAVAILABLE')
+    if directory is None or directory!=directory_again or (mount is not None and mount!=mount_again):
+        if directory_again is not None and stages['datadir_end']['completed']:
+            unconfirmed('datadir_end','DEPENDENCY_UNAVAILABLE' if directory is None or directory['state']!='observed'
+                else 'STABILITY_NOT_CONFIRMED')
+        if mount_again is not None and stages['mount_end']['completed']:unconfirmed('mount_end')
+        result['datadir']=dict(state='unknown',is_directory=None,filesystem='unknown',device_matches=None)
+    if (all(r['state']=='observed' and r['stable'] is True for r in result['processes'])
+            and all(r['owned_by_service_mainpid'] is True for r in result['sockets'])
+            and result['datadir']==dict(state='observed',is_directory=True,filesystem='local_block',device_matches=True)):
+        result['observation_state']='OBSERVED'
     return result
 '''
