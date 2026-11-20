@@ -178,13 +178,16 @@ class TransportTests(unittest.TestCase):
     context=ScopePolicyTests.context
     api=ScopePolicyTests.api
     def fixture(self, nonce):
-        child = dict(version='jsm-test-db-os-2760-v1', nonce=nonce, euid=0,
+        child = dict(version='jsm-test-db-os-2760-v2', nonce=nonce, euid=0,
             observation_state='OBSERVED',
-            processes=[dict(id=r,state='observed',exe_matches=True,namespace_matches=True,stable=True)
+            processes=[dict(id=r,state='observed',exe_matches=True,namespace_matches=True,stable=True,
+                net_namespace_matches=True,mount_namespace_matches=True,
+                load_state='loaded',active_state='active',pid_available=True)
                 for r in ('apache','php','mysql')],
             sockets=[dict(id=r,state='observed',is_socket=True,kernel_listener=True,owned_by_service_mainpid=True)
                 for r in ('php','mysql')],
             datadir=dict(state='observed',is_directory=True,filesystem='local_block',device_matches=True),
+            stages=[dict(id=s,attempted=True,completed=True,error='NONE') for s in self.m.STAGE_IDS],
             effective_api_binding='NOT_ESTABLISHED',test_disk_identity='NOT_ESTABLISHED',
             db_proof='BLOCKED_TARGET_ADMISSION',sql='NOT_ATTEMPTED')
         return dict(version='jsm-test-installed-route-outer-v2',nonce=nonce,principal='marinagurina',
@@ -198,6 +201,31 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(result['sql'],'NOT_ATTEMPTED')
         self.assertEqual(result['db_proof'],'BLOCKED_TARGET_ADMISSION')
         self.assertEqual(result['effective_api_binding'],'NOT_ESTABLISHED')
+
+    def test_v2_projection_rejects_forged_stage_fields_axes_units_or_completion(self):
+        nonce='b'*32
+        for change in ('old','missing','extra','order','attempt','completed','error','private',
+                'axis','combined','unit','pid','incomplete'):
+            with self.subTest(change=change):
+                outer=self.fixture(nonce);child=outer['root_diagnostic'];stage=child['stages'][0]
+                if change=='old':child['version']='jsm-test-db-os-2760-v1'
+                elif change=='missing':child['stages'].pop()
+                elif change=='extra':stage['raw_error']='PRIVATE'
+                elif change=='order':child['stages'].reverse()
+                elif change=='attempt':stage['attempted']=1
+                elif change=='completed':stage['attempted']=False
+                elif change=='error':stage['error']='PRIVATE'
+                elif change=='private':child['processes'][0]['raw_unit']='PRIVATE'
+                elif change=='axis':child['processes'][0]['net_namespace_matches']='PRIVATE'
+                elif change=='combined':child['processes'][0]['mount_namespace_matches']=False
+                elif change=='unit':child['processes'][0]['load_state']='PRIVATE'
+                elif change=='pid':child['processes'][0]['pid_available']=123
+                else:stage.update(completed=False,error='OS_REFUSED')
+                result=self.m.project_remote(json.dumps(outer).encode(),nonce)
+                self.assertIsNone(result['os_observation'])
+                self.assertEqual(result['ssh'],'OBSERVED')
+                self.assertEqual(result['sql'],'NOT_ATTEMPTED')
+                self.assertNotIn('PRIVATE',json.dumps(result))
 
     def test_malformed_duplicate_private_or_forged_observation_never_escapes(self):
         nonce='b'*32

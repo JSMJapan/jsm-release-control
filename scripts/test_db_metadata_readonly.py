@@ -22,7 +22,7 @@ from apache_parity_bridge import Refused, _bounded, strict_json
 from hostinger_preflight import policy_ready
 from test_api_readonly_access import TestPolicyApi, PIN_SHA256, private_file, _python_version
 from test_api_installed_route_readonly import wrap_root_program
-from test_db_os_metadata import LIBRARY
+from test_db_os_metadata import LIBRARY, STAGE_IDS, STAGE_ERRORS
 
 REPO = 'JSMJapan/jsm-release-control'
 GH_REPO = '/repos/' + REPO
@@ -58,7 +58,7 @@ def blocked_receipt(reason, *, policy_verified=False):
     # not false, and not a successful effective-binding or SQL observation.
     reason = reason if type(reason) is str and reason in SAFE_REASONS else 'TEST_DB_SCOPE_REJECTED'
     policy_verified = policy_verified is True
-    return dict(receipt_version='jsm-test-db-scope-2760-v1', status='BLOCKED', scope_state='PREPARED',
+    return dict(receipt_version='jsm-test-db-scope-2760-v2', status='BLOCKED', scope_state='PREPARED',
         db_proof='BLOCKED_TARGET_ADMISSION' if policy_verified else 'NOT_ESTABLISHED', reason=reason,
         target_resource='gce:dark-berm-508215-d2:asia-northeast1-a:150919059249400713',
         target_domain='develop.jsmjapan.com', protected_policy_verified=policy_verified, admitted_baseline=None,
@@ -108,24 +108,47 @@ def remote_program(nonce):
 def _child_projection(child, nonce):
     # Strictly closed, typed public schema: arbitrary raw paths/FDs/errors are
     # not forwarded, even if the remote capsule malfunctions.
-    fields={'version','nonce','euid','observation_state','processes','sockets','datadir',
+    fields={'version','nonce','euid','observation_state','processes','sockets','datadir','stages',
         'effective_api_binding','test_disk_identity','db_proof','sql'}
-    if (type(child) is not dict or set(child)!=fields or child['version']!='jsm-test-db-os-2760-v1'
+    if (type(child) is not dict or set(child)!=fields or child['version']!='jsm-test-db-os-2760-v2'
             or child['nonce']!=nonce or type(child['euid']) is not int or child['euid']!=0
             or child['observation_state'] not in ('PARTIAL','OBSERVED')
             or child['effective_api_binding']!='NOT_ESTABLISHED' or child['test_disk_identity']!='NOT_ESTABLISHED'
             or child['db_proof']!='BLOCKED_TARGET_ADMISSION' or child['sql']!='NOT_ATTEMPTED'):
         return None
     for name,ids,booleans in (
-            ('processes',('apache','php','mysql'),('exe_matches','namespace_matches','stable')),
+            ('processes',('apache','php','mysql'),('exe_matches','namespace_matches','stable',
+                'net_namespace_matches','mount_namespace_matches','pid_available')),
             ('sockets',('php','mysql'),('is_socket','kernel_listener','owned_by_service_mainpid'))):
         rows=child[name]
         if type(rows) is not list or len(rows)!=len(ids):return None
         for row,identity in zip(rows,ids):
-            if (type(row) is not dict or set(row)!={'id','state',*booleans} or row['id']!=identity
+            extra={'load_state','active_state'} if name=='processes' else set()
+            if (type(row) is not dict or set(row)!={'id','state',*booleans,*extra} or row['id']!=identity
                     or row['state'] not in ('unknown','observed')
                     or any(row[key] is not None and type(row[key]) is not bool for key in booleans)):
                 return None
+            if name=='processes':
+                if (row['load_state'] not in (None,'loaded','not-found','masked','error')
+                        or row['active_state'] not in (None,'active','inactive','failed','activating','deactivating')):return None
+                if ((row['load_state'] is None)!=(row['active_state'] is None)
+                        or (row['load_state'] is None)!=(row['pid_available'] is None)):return None
+                net,mount=row['net_namespace_matches'],row['mount_namespace_matches']
+                if row['namespace_matches'] is not None:
+                    if type(net) is not bool or type(mount) is not bool or row['namespace_matches'] is not (net and mount):return None
+                if row['state']=='observed' and (row['load_state']!='loaded' or row['active_state']!='active'
+                        or row['pid_available'] is not True or net is not True or mount is not True):return None
+    stages=child['stages']
+    if type(stages) is not list or len(stages)!=len(STAGE_IDS):return None
+    for row,identity in zip(stages,STAGE_IDS):
+        if (type(row) is not dict or set(row)!={'id','attempted','completed','error'} or row['id']!=identity
+                or type(row['attempted']) is not bool or type(row['completed']) is not bool
+                or type(row['error']) is not str or row['error'] not in STAGE_ERRORS):return None
+        if row['completed']:
+            if row['attempted'] is not True or row['error']!='NONE':return None
+        elif row['error']=='NONE':return None
+        if row['attempted'] is False and row['error'] not in (
+                'NOT_ATTEMPTED','DEPENDENCY_UNAVAILABLE','UNIT_UNAVAILABLE','PID_UNAVAILABLE','DEADLINE'):return None
     directory=child['datadir']
     if (type(directory) is not dict or set(directory)!={'state','is_directory','filesystem','device_matches'}
             or directory['state'] not in ('unknown','observed')
@@ -137,7 +160,7 @@ def _child_projection(child, nonce):
         and all(row['state']=='observed' and all(row[k] is True for k in ('is_socket','kernel_listener','owned_by_service_mainpid'))
             for row in child['sockets'])
         and directory==dict(state='observed',is_directory=True,filesystem='local_block',device_matches=True))
-    if child['observation_state']=='OBSERVED' and not complete:return None
+    if child['observation_state']=='OBSERVED' and (not complete or not all(s['completed'] for s in stages)):return None
     return child
 
 

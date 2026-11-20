@@ -84,7 +84,8 @@ class OsMetadataTests(unittest.TestCase):
         units = ns['_parse_units'](UNITS)
         ns['_unit_snapshot'] = lambda deadline: copy.deepcopy(units)
         ns['_proc_snapshot'] = lambda role,pid,deadline: dict(state='observed', start=pid * 100,
-            exe_matches=True, namespace_matches=True, sockets={7001} if role == 'php' else {7002} if role == 'mysql' else set())
+            exe_matches=True, namespace_matches=True, net_namespace_matches=True, mount_namespace_matches=True,
+            sockets={7001} if role == 'php' else {7002} if role == 'mysql' else set())
         ns['_proc_still_same'] = lambda role,pid,start,deadline: True
         ns['_unix_snapshot'] = lambda deadline: ns['_parse_unix'](UNIX)
         ns['_socket_metadata'] = lambda role,deadline: dict(state='observed', is_socket=True, identity=('fs-inode',11 if role=='php' else 22))
@@ -236,6 +237,75 @@ class OsMetadataTests(unittest.TestCase):
                 refused=self.ns['_object_metadata'](str(alias),time.monotonic()+1,'directory')
             self.assertEqual(observed['state'],'observed');self.assertEqual(refused['state'],'unknown')
             self.assertNotIn('PRIVATE',json.dumps(observed))
+
+    def test_unix_refusal_does_not_hide_independent_fixed_socket_and_datadir_metadata(self):
+        ns,_,_=self.fixture();calls=[]
+        def refused(deadline):raise ValueError('PRIVATE')
+        ns['_unix_snapshot']=refused
+        original=ns['_datadir_metadata']
+        ns['_datadir_metadata']=lambda deadline:(calls.append('datadir') or original(deadline))
+        result=ns['_observe'](NONCE);stages={r['id']:r for r in result['stages']}
+        self.assertEqual(result['observation_state'],'PARTIAL')
+        self.assertEqual(result['datadir']['state'],'observed')
+        self.assertEqual(len(calls),2)
+        self.assertTrue(result['sockets'][0]['is_socket'])
+        self.assertIsNone(result['sockets'][0]['kernel_listener'])
+        self.assertIsNone(result['sockets'][0]['owned_by_service_mainpid'])
+        self.assertEqual(stages['unix_begin'],dict(id='unix_begin',attempted=True,completed=False,error='PARSE_OR_GUARD_REFUSED'))
+        self.assertTrue(stages['datadir_begin']['completed'])
+        self.assertNotIn('PRIVATE',json.dumps(result))
+
+    def test_first_socket_refusal_does_not_hide_other_fixed_metadata(self):
+        ns,_,_=self.fixture();original=ns['_socket_metadata']
+        def socket(role,deadline):
+            if role=='php':raise PermissionError('PRIVATE')
+            return original(role,deadline)
+        ns['_socket_metadata']=socket
+        result=ns['_observe'](NONCE);stages={r['id']:r for r in result['stages']}
+        self.assertEqual(stages['php_socket_begin']['error'],'OS_REFUSED')
+        self.assertTrue(stages['mysql_socket_begin']['completed'])
+        self.assertEqual(result['datadir']['state'],'observed')
+        self.assertEqual(result['observation_state'],'PARTIAL')
+
+    def test_deadline_marks_skipped_stages_without_more_operations(self):
+        ns,_,_=self.fixture();clock=[0.0]
+        def unix(deadline):clock[0]=4.0;raise ValueError('PRIVATE')
+        ns['_unix_snapshot']=unix
+        ns['_socket_metadata']=lambda *a:self.fail('Socket after deadline')
+        ns['_datadir_metadata']=lambda *a:self.fail('Datadir after deadline')
+        with patch.object(ns['time'],'monotonic',side_effect=lambda:clock[0]):
+            result=ns['_observe'](NONCE)
+        stages={r['id']:r for r in result['stages']}
+        self.assertTrue(stages['unix_begin']['attempted'])
+        self.assertEqual(stages['unix_begin']['error'],'DEADLINE')
+        self.assertFalse(stages['datadir_begin']['attempted'])
+        self.assertEqual(stages['datadir_begin']['error'],'DEADLINE')
+        self.assertEqual(result['sql'],'NOT_ATTEMPTED')
+
+    def test_already_validated_unit_states_disambiguate_mysql_process_not_attempted(self):
+        ns,units,_=self.fixture();units['mysql'].update(active='inactive',pid=0)
+        result=ns['_observe'](NONCE);mysql=result['processes'][2]
+        self.assertEqual((mysql['load_state'],mysql['active_state'],mysql['pid_available']),('loaded','inactive',False))
+        stages={r['id']:r for r in result['stages']}
+        self.assertEqual(stages['mysql_process_begin'],dict(id='mysql_process_begin',attempted=False,completed=False,error='UNIT_UNAVAILABLE'))
+        self.assertEqual(result['db_proof'],'BLOCKED_TARGET_ADMISSION')
+
+    def test_separate_namespace_axes_do_not_admit_mount_mismatch_or_read_fds(self):
+        ns=self.ns;pid=303
+        text='303 (mysqld) S '+' '.join(['0']*18+['7654321']+['0']*10)
+        own='/proc/'+str(os.getpid())
+        def link(path,deadline):
+            if path.endswith('/exe'):return '/usr/sbin/mysqld'
+            if path.endswith('/net'):return 'net:[1]'
+            if path.endswith('/mnt'):return 'mnt:[1]' if path.startswith(own+'/') else 'mnt:[2]'
+            self.fail('Unexpected path')
+        ns['_proc_read']=lambda *a:text;ns['_readlink']=link
+        ns['_fd_sockets']=lambda *a:self.fail('FD read after namespace refusal')
+        result=ns['_proc_snapshot']('mysql',pid,time.monotonic()+1)
+        self.assertIs(result['net_namespace_matches'],True)
+        self.assertIs(result['mount_namespace_matches'],False)
+        self.assertIs(result['namespace_matches'],False)
+        self.assertEqual(result['state'],'unknown')
 
 
 if __name__ == '__main__': unittest.main()
