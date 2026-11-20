@@ -2,8 +2,13 @@
 import copy
 import importlib.util
 import json
+import os
 from pathlib import Path
+import tempfile
+import time
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / 'scripts/test_db_os_metadata.py'
@@ -175,6 +180,61 @@ class OsMetadataTests(unittest.TestCase):
                 result=ns['_observe'](NONCE)
                 self.assertEqual(result['observation_state'],'PARTIAL')
                 self.assertIsNone(result['sockets'][1]['owned_by_service_mainpid'])
+
+    def test_actual_fd_helper_rejects_invalid_pid_before_path_access(self):
+        for pid in (True,0,-1,'303/../PRIVATE',2147483648):
+            with patch.dict(self.ns,{'_parents':lambda *args: self.fail('Invalid PID reached path reader')}):
+                with self.assertRaises(ValueError):self.ns['_fd_sockets'](pid,time.monotonic()+1)
+
+    def test_actual_fd_reader_caps_names_targets_count_and_denied_links(self):
+        class Entries:
+            def __init__(inner,names):inner.names=names
+            def __enter__(inner):return iter(SimpleNamespace(name=n) for n in inner.names)
+            def __exit__(inner,*args):pass
+        for names,link,error in ((['1','2'],'socket:[7002]',None),
+                ([str(i) for i in range(129)],'socket:[7002]',ValueError),
+                (['1','PRIVATE'],'socket:[7002]',ValueError),
+                (['1'],'X'*4097,ValueError),(['1'],None,PermissionError)):
+            def readlink(*args,**kwargs):
+                if link is None:raise PermissionError('PRIVATE')
+                return link
+            with self.subTest(count=len(names),error=error), \
+                    patch.dict(self.ns,{'_parents':lambda *a:([41],'fd')}), \
+                    patch.object(self.ns['os'],'open',return_value=42), \
+                    patch.object(self.ns['os'],'close'), \
+                    patch.object(self.ns['os'],'scandir',return_value=Entries(names)), \
+                    patch.object(self.ns['os'],'readlink',side_effect=readlink):
+                if error:
+                    with self.assertRaises(error):self.ns['_fd_sockets'](303,time.monotonic()+1)
+                else:self.assertEqual(self.ns['_fd_sockets'](303,time.monotonic()+1),{7002})
+
+    def test_actual_bounded_read_accepts_proc_size_zero_rejects_oversize_and_symlink(self):
+        with tempfile.TemporaryDirectory(prefix='jsm-2760-offline-',dir='/private/tmp') as folder:
+            root=Path(folder);source=root/'source';source.write_bytes(b'proc-stat-fixture')
+            actual_fstat=os.fstat
+            def zero_size(fd):
+                value=actual_fstat(fd)
+                names=('st_dev','st_ino','st_mode','st_uid','st_gid','st_nlink','st_ctime_ns')
+                return SimpleNamespace(**{name:getattr(value,name) for name in names},st_size=0)
+            with patch.object(self.ns['os'],'fstat',side_effect=zero_size):
+                self.assertEqual(self.ns['_proc_read'](str(source),time.monotonic()+1),'proc-stat-fixture')
+            source.write_bytes(b'X'*4097)
+            with self.assertRaises(ValueError):self.ns['_proc_read'](str(source),time.monotonic()+1,4096)
+            leaf=root/'leaf';leaf.symlink_to(source)
+            with self.assertRaises(OSError):self.ns['_proc_read'](str(leaf),time.monotonic()+1)
+            directory=root/'real';directory.mkdir();(directory/'file').write_text('PRIVATE')
+            parent=root/'parent';parent.symlink_to(directory,target_is_directory=True)
+            with self.assertRaises(OSError):self.ns['_proc_read'](str(parent/'file'),time.monotonic()+1)
+
+    def test_actual_metadata_directory_symlink_is_unknown_without_listing_or_contents(self):
+        with tempfile.TemporaryDirectory(prefix='jsm-2760-offline-',dir='/private/tmp') as folder:
+            root=Path(folder);target=root/'data';target.mkdir();(target/'PRIVATE').write_text('PRIVATE')
+            alias=root/'link';alias.symlink_to(target,target_is_directory=True)
+            with patch.object(self.ns['os'],'scandir',side_effect=AssertionError('No directory listing')):
+                observed=self.ns['_object_metadata'](str(target),time.monotonic()+1,'directory')
+                refused=self.ns['_object_metadata'](str(alias),time.monotonic()+1,'directory')
+            self.assertEqual(observed['state'],'observed');self.assertEqual(refused['state'],'unknown')
+            self.assertNotIn('PRIVATE',json.dumps(observed))
 
 
 if __name__ == '__main__': unittest.main()

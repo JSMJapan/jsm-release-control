@@ -117,6 +117,7 @@ def _pid_ready(pid):
 def _fd_sockets(pid,deadline):
     fds=[];fd=None;found=set();count=0
     try:
+        if not _pid_ready(pid):raise ValueError()
         fds,name=_parents('/proc/'+str(pid)+'/fd',deadline)
         fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fds[-1])
         with os.scandir(fd) as entries:
