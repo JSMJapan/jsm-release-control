@@ -13,6 +13,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / 'scripts/test_db_os_metadata.py'
 NONCE = 'b' * 32
+FIXTURE_TMP = str(Path(tempfile.gettempdir()).resolve())
 UNITS = '''Id=apache2.service
 LoadState=loaded
 ActiveState=active
@@ -209,7 +210,7 @@ class OsMetadataTests(unittest.TestCase):
                 else:self.assertEqual(self.ns['_fd_sockets'](303,time.monotonic()+1),{7002})
 
     def test_actual_bounded_read_accepts_proc_size_zero_rejects_oversize_and_symlink(self):
-        with tempfile.TemporaryDirectory(prefix='jsm-2760-offline-',dir='/private/tmp') as folder:
+        with tempfile.TemporaryDirectory(prefix='jsm-2760-offline-',dir=FIXTURE_TMP) as folder:
             root=Path(folder);source=root/'source';source.write_bytes(b'proc-stat-fixture')
             actual_fstat=os.fstat
             def zero_size(fd):
@@ -227,7 +228,7 @@ class OsMetadataTests(unittest.TestCase):
             with self.assertRaises(OSError):self.ns['_proc_read'](str(parent/'file'),time.monotonic()+1)
 
     def test_actual_metadata_directory_symlink_is_unknown_without_listing_or_contents(self):
-        with tempfile.TemporaryDirectory(prefix='jsm-2760-offline-',dir='/private/tmp') as folder:
+        with tempfile.TemporaryDirectory(prefix='jsm-2760-offline-',dir=FIXTURE_TMP) as folder:
             root=Path(folder);target=root/'data';target.mkdir();(target/'PRIVATE').write_text('PRIVATE')
             alias=root/'link';alias.symlink_to(target,target_is_directory=True)
             with patch.object(self.ns['os'],'scandir',side_effect=AssertionError('No directory listing')):
