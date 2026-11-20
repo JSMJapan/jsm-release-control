@@ -307,5 +307,52 @@ class OsMetadataTests(unittest.TestCase):
         self.assertIs(result['namespace_matches'],False)
         self.assertEqual(result['state'],'unknown')
 
+    def projection(self,child):
+        spec=importlib.util.spec_from_file_location('stages_projection',ROOT/'scripts/test_db_metadata_readonly.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        return module._child_projection(child,NONCE)
+
+    def test_each_existing_stage_refusal_is_closed_and_cannot_promote_complete(self):
+        for target in self.m.STAGE_IDS:
+            with self.subTest(target=target):
+                ns,_,_=self.fixture();counts={}
+                for helper,kind in (('_unit_snapshot','units'),('_unix_snapshot','unix'),
+                        ('_proc_snapshot','process'),('_socket_metadata','socket'),
+                        ('_datadir_metadata','datadir'),('_mount_snapshot','mount')):
+                    original=ns[helper]
+                    def read(*args,_original=original,_kind=kind):
+                        role=args[0] if _kind in ('process','socket') else None
+                        prefix=(role+'_'+_kind) if role is not None else _kind
+                        counts[prefix]=counts.get(prefix,0)+1
+                        name=prefix+('_begin' if counts[prefix]==1 else '_end')
+                        if name==target:raise PermissionError('PRIVATE')
+                        return _original(*args)
+                    ns[helper]=read
+                result=ns['_observe'](NONCE);stages={r['id']:r for r in result['stages']}
+                self.assertTrue(stages[target]['attempted'])
+                self.assertFalse(stages[target]['completed'])
+                self.assertEqual(stages[target]['error'],'OS_REFUSED')
+                self.assertEqual(result['observation_state'],'PARTIAL')
+                self.assertIsNotNone(self.projection(result))
+                self.assertNotIn('PRIVATE',json.dumps(result))
+                self.assertLessEqual(len(json.dumps(result).encode('ascii')),12288)
+
+    def test_actual_observer_full_and_namespace_partial_packets_fit_strict_v2_projection(self):
+        for mismatch in (False,True):
+            ns,_,_=self.fixture()
+            if mismatch:
+                original=ns['_proc_snapshot']
+                def process(role,pid,deadline):
+                    row=original(role,pid,deadline)
+                    if role in ('apache','php'):
+                        row.update(state='unknown',namespace_matches=False,mount_namespace_matches=False)
+                    return row
+                ns['_proc_snapshot']=process
+            result=ns['_observe'](NONCE)
+            self.assertIsNotNone(self.projection(result))
+            self.assertEqual(result['observation_state'],'PARTIAL' if mismatch else 'OBSERVED')
+            self.assertEqual(result['sql'],'NOT_ATTEMPTED')
+            self.assertLessEqual(len(json.dumps(result).encode('ascii')),12288)
+
 
 if __name__ == '__main__': unittest.main()

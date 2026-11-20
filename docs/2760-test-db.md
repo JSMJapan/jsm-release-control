@@ -18,7 +18,7 @@ One-shot44705731325 израсходован; этот план не разре�
   attempted/completed booleans +closed error enums; separate already-read
   net/mnt booleans и validated load/active/pid_available. Versioned v2 schema,
   no raw errors/paths/PIDs, no new paths/properties/commands/credentials.
-- [x] GREEN/adversarial: новые отказные сценарии не дают fake complete, deadline
+- [x] GREEN/adversarial: отказы всех18 fixed stages не дают fake complete, deadline
   не допускает новых syscall после budget; namespace mismatch не допускается
   для FD ownership. Старый installed-route payload invariant, original
   transport/complete/SQL admission guards остаются проверены existing tests.
@@ -37,7 +37,15 @@ Validated unit load/active/pid_available не содержат raw PID или un
 Отказ Unix read/parser не блокирует независимые уже разрешённые filesystem
 socket/datadir metadata, пока не истёк прежний budget. Связь listener/FD при
 неизвестном Unix snapshot или namespace mismatch не утверждается.
-Первый repair chunk:176 local tests,173 PASS+3 SKIP. Новый v2 runtime NOT_RUN.
+Первый repair chunk:176 local tests,173 PASS+3 SKIP. Frozen repair:179 local
+tests,176 PASS+3 SKIP; все18 actual-observer stage refusal packets проходят
+strict v2 projection как PARTIAL. Проверены full/namespace-partial packet и
+противоречие attempted=true/error=NOT_ATTEMPTED (отклоняется).
+Новый v2 runtime NOT_RUN; exact frozen CI и два non-author reviews ещё gates.
+`pid_available` означает только валидный positive MainPID, не service health.
+`STABILITY_NOT_CONFIRMED` не утверждает изменение процесса/объекта;
+`DEADLINE` различается attempted flag до/после входа в probe. Отсутствующий
+dependency не выдаётся за наблюдённое изменение filesystem/listener.
 
 **SCOPE PREPARED / DB PROOF BLOCKED_TARGET_ADMISSION / SQL_NOT_ATTEMPTED.**
 Кандидат содержит фиксированное OS-наблюдение: три фиксированных
@@ -198,7 +206,7 @@ Baseline base0f32: 141 тест, 138 PASS +3 explicit SKIP на этом Mac:
 2 private opt-ins и Linux-only O_NOATIME syscall proof. Новый полный локальный
 run исходного phase1:170 тестов,167 PASS +те же3 SKIP. Actual v1 OS-only
 one-shot выполнен отдельно; SQL/application/DB credentials не использовались.
-Current v2 repair local:176 тестов,173 PASS +те же3 SKIP, новый runtime NOT_RUN.
+Current v2 repair local:179 тестов,176 PASS +те же3 SKIP, новый runtime NOT_RUN.
 Новые офлайн adversarial проверки ловят forged env baseline/SQL/DSN, actor/ref/
 attempt/workflow drift, policy/owner/branch drift, private exception leakage и
 продвижение неподтверждённых полей до DB proof. Проверены actual bounded reader

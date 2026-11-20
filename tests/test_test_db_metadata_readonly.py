@@ -227,6 +227,13 @@ class TransportTests(unittest.TestCase):
                 self.assertEqual(result['sql'],'NOT_ATTEMPTED')
                 self.assertNotIn('PRIVATE',json.dumps(result))
 
+    def test_partial_packet_cannot_label_an_attempt_as_not_attempted(self):
+        nonce='b'*32;outer=self.fixture(nonce);child=outer['root_diagnostic']
+        child['observation_state']='PARTIAL'
+        child['stages'][0].update(attempted=True,completed=False,error='NOT_ATTEMPTED')
+        result=self.m.project_remote(json.dumps(outer).encode(),nonce)
+        self.assertIsNone(result['os_observation'])
+
     def test_malformed_duplicate_private_or_forged_observation_never_escapes(self):
         nonce='b'*32
         cases=[]

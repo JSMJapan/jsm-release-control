@@ -147,6 +147,7 @@ def _child_projection(child, nonce):
         if row['completed']:
             if row['attempted'] is not True or row['error']!='NONE':return None
         elif row['error']=='NONE':return None
+        if row['attempted'] and row['error'] in ('NOT_ATTEMPTED','UNIT_UNAVAILABLE','PID_UNAVAILABLE'):return None
         if row['attempted'] is False and row['error'] not in (
                 'NOT_ATTEMPTED','DEPENDENCY_UNAVAILABLE','UNIT_UNAVAILABLE','PID_UNAVAILABLE','DEADLINE'):return None
     directory=child['datadir']
