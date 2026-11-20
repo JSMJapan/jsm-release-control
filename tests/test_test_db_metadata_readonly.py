@@ -1,6 +1,7 @@
 """Offline #2760 scope barrier. No server, SQL or private credentials."""
 import copy
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -287,6 +288,39 @@ class TransportTests(unittest.TestCase):
         step=probe['steps'][1]
         self.assertEqual(set(step['env']),{'TEST_API_ADMIN_SSH_KEY','TEST_API_KNOWN_HOSTS'})
         self.assertEqual(step['run'],'python3 -I -B scripts/test_db_metadata_readonly.py')
+
+    def test_main_preserves_transport_attempt_on_failure_timeout_or_malformed_output(self):
+        import hashlib
+        known='synthetic-pinned-key\n';nonce='b'*32
+        original_program=self.m.remote_program
+        for failure in ('exit','malformed','deadline','exception','pin','program'):
+            with self.subTest(failure=failure):
+                env=self.context();env.update(TEST_API_ADMIN_SSH_KEY='synthetic-private-fixture',TEST_API_KNOWN_HOSTS=known)
+                api,_=self.api();out=io.StringIO()
+                if failure=='pin':env['TEST_API_KNOWN_HOSTS']='PRIVATE'
+                def bounded(*args,**kwargs):
+                    if failure=='exit':return 1,b'PRIVATE'
+                    if failure=='malformed':return 0,b'PRIVATE'
+                    if failure=='deadline':self.m.signal.raise_signal(self.m.signal.SIGALRM)
+                    if failure=='exception':raise RuntimeError('PRIVATE')
+                    self.fail('Pin rejection must precede transport')
+                def program(value):
+                    if failure=='program':raise RuntimeError('PRIVATE')
+                    return original_program(value)
+                with patch.object(self.m,'PIN_SHA256',hashlib.sha256(known.encode()).hexdigest()), \
+                        patch.object(self.m,'TestPolicyApi',return_value=api), \
+                        patch.object(self.m.secrets,'token_hex',return_value=nonce), \
+                        patch.object(self.m,'_bounded',side_effect=bounded), \
+                        patch.object(self.m,'remote_program',side_effect=program), \
+                        patch.object(self.m.sys,'argv',[str(SCRIPT)]), \
+                        patch.object(self.m.os,'environ',env),patch('sys.stdout',out):
+                    self.assertEqual(self.m.main(),1)
+                result=json.loads(out.getvalue())
+                self.assertEqual(result['ssh'],'NOT_ATTEMPTED' if failure in ('pin','program') else 'ATTEMPTED_NOT_CONFIRMED')
+                self.assertTrue(result['protected_policy_verified'])
+                self.assertEqual(result['sql'],'NOT_ATTEMPTED')
+                self.assertEqual(result['db_proof'],'BLOCKED_TARGET_ADMISSION')
+                self.assertNotIn('PRIVATE',out.getvalue())
 
 
 if __name__ == '__main__':

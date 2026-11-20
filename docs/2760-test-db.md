@@ -76,6 +76,11 @@ states. Raw PID/starttime/exe/ns/FD/socket/mount strings/private hashes не
 `db_data_provenance/db_isolation/egress_isolation=NOT_ESTABLISHED`,
 `sql=NOT_ATTEMPTED`, `db_proof=BLOCKED_TARGET_ADMISSION`.
 
+Phase receipt различает `ssh=NOT_ATTEMPTED` до вызова транспорта,
+`ATTEMPTED_NOT_CONFIRMED` при его ошибке/timeout/malformed output и `OBSERVED`
+только после strict outer principal/nonce validation. Internal phase state
+сохраняется при SIGALRM; ошибка не стирает уже проверенную protection policy.
+
 ## Какие доказательства нужны до отдельной SQL-реализации
 
 Ни одно поле ниже сейчас не заполнено и не принято кодом. Это контракт для
@@ -155,7 +160,7 @@ NOT_ESTABLISHED. Synthetic provenance и egress требуют отдельны�
 
 Baseline base0f32: 141 тест, 138 PASS +3 explicit SKIP на этом Mac:
 2 private opt-ins и Linux-only O_NOATIME syscall proof. Новый полный локальный
-run: 169 тестов, 166 PASS + те же3 SKIP; actual DB/runtime не запускались.
+run: 170 тестов, 167 PASS + те же3 SKIP; actual DB/runtime не запускались.
 Новые офлайн adversarial проверки ловят forged env baseline/SQL/DSN, actor/ref/
 attempt/workflow drift, policy/owner/branch drift, private exception leakage и
 продвижение неподтверждённых полей до DB proof. Проверены actual bounded reader

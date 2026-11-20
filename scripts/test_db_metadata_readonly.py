@@ -160,9 +160,18 @@ def project_remote(raw, nonce):
     return result
 
 
-def collect(api, env):
+class _Progress:
+    """Local phase facts, retained by main even when SIGALRM interrupts a call."""
+    def __init__(self):
+        self.policy_verified=False
+        self.ssh='NOT_ATTEMPTED'
+
+
+def collect(api, env, *, _progress=None):
+    progress=_Progress() if _progress is None else _progress
     deadline=time.monotonic()+OVERALL_SECONDS
     policy_gate(api,env)  # Existing public policy before any SSH credential access.
+    progress.policy_verified=True
     key,known=env.get('TEST_API_ADMIN_SSH_KEY'),env.get('TEST_API_KNOWN_HOSTS')
     need(type(key) is str and 0<len(key)<=16384 and '\x00' not in key,'TEST_SSH_KEY_NOT_CONFIGURED')
     need(type(known) is str and len(known)<=16384 and hashlib.sha256(known.encode()).hexdigest()==PIN_SHA256,
@@ -180,9 +189,15 @@ def collect(api, env):
             '-o','ServerAliveCountMax=2','-o','LogLevel=ERROR',
             'marinagurina@34.104.157.63','/usr/bin/python3','-I','-B','-S','-']
         budget=min(15,deadline-time.monotonic()-2);need(budget>0,'OVERALL_DEADLINE')
-        code,raw=_bounded(command,data=remote_program(nonce),limit=16384,timeout=budget)
+        program=remote_program(nonce)
+        # Invocation is an attempt even if the bounded transport then fails,
+        # times out or yields malformed output. It is not confirmed SSH identity.
+        progress.ssh='ATTEMPTED_NOT_CONFIRMED'
+        code,raw=_bounded(command,data=program,limit=16384,timeout=budget)
         need(code==0,'SSH_TRANSPORT_NOT_CONFIRMED')
-        return project_remote(raw,nonce)
+        result=project_remote(raw,nonce)
+        progress.ssh=result['ssh']
+        return result
 
 
 def main():
@@ -190,6 +205,7 @@ def main():
         raise Refused('OVERALL_DEADLINE')
     source_sha = None
     run_url = None
+    progress = _Progress()
     try:
         if len(sys.argv) != 1:
             raise Refused('NO_ARGUMENTS_OR_INPUTS_ACCEPTED')
@@ -198,9 +214,10 @@ def main():
         run_url = 'https://github.com/' + REPO + '/actions/runs/' + os.environ['GITHUB_RUN_ID']
         signal.signal(signal.SIGALRM, expired)
         signal.setitimer(signal.ITIMER_REAL, OVERALL_SECONDS)
-        result = collect(TestPolicyApi(), os.environ)
+        result = collect(TestPolicyApi(), os.environ, _progress=progress)
     except Exception as error:
-        result = blocked_receipt(safe_reason(error))
+        result = blocked_receipt(safe_reason(error), policy_verified=progress.policy_verified)
+        result['ssh'] = progress.ssh
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
     result.update(source_sha=source_sha, workflow_run_url=run_url,
