@@ -39,8 +39,9 @@ def _docker_ports(value):
                 or type(port['PrivatePort'])is not int or not 1<=port['PrivatePort']<=65535
                 or port['Type'] not in ('tcp','udp','sctp')):return unknown
         public=port.get('PublicPort')
-        if public is not None and (type(public)is not int or not 1<=public<=65535):return unknown
+        if 'PublicPort' in port and (type(public)is not int or not 1<=public<=65535):return unknown
         address=port.get('IP')
+        if 'IP' in port and type(address)is not str:return unknown
         if public is not None:
             if type(address)is not str or len(address)>64:return unknown
             try:

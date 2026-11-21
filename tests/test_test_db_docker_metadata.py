@@ -321,6 +321,28 @@ class DockerMetadataTests(unittest.TestCase):
         self.assertIsNone(result['port3306_published'])
         self.assertNotIn('PRIVATE', json.dumps(result))
 
+    def test_absent_optional_port_fields_differ_from_explicit_null_or_wrong_types(self):
+        flags=('port3306_exposed','port3306_published','port3306_loopback','port3306_nonloopback')
+        exposed=dict(PrivatePort=3306,Type='tcp')
+        valid=summary();valid['Ports']=[exposed]
+        result=self.probe(self.transport(response=json.dumps([valid]).encode()))
+        self.assertEqual(result['state'],'OBSERVED')
+        self.assertEqual([result['containers'][0][key] for key in flags],[True,False,False,False])
+        self.assertIsNotNone(self.module.project_discovery(result))
+        malformed=[dict(exposed,PublicPort=None,IP=None),dict(exposed,PublicPort=None),
+            dict(exposed,IP=None),dict(exposed,PublicPort=False,IP='127.0.0.1'),
+            dict(exposed,PublicPort='3306',IP='127.0.0.1'),dict(exposed,IP=False)]
+        for port in malformed:
+            with self.subTest(port=port):
+                row=summary();row['Ports']=[port];body=json.dumps([row]).encode()
+                parsed=self.ns['_docker_parse_body'](body)[0]
+                self.assertEqual([parsed[key] for key in flags],[None,None,None,None])
+                result=self.probe(self.transport(response=body))
+                self.assertEqual(result['state'],'INCOMPLETE');self.assertEqual(result['error'],'SUMMARY_UNKNOWN')
+                self.assertEqual([result['containers'][0][key] for key in flags],[None,None,None,None])
+                self.assertIsNotNone(self.module.project_discovery(result))
+                self.assertNotIn('PRIVATE',json.dumps(result))
+
     def test_duplicate_identity_keys_trailing_data_and_wrong_root_are_refused(self):
         duplicate_key = ('[{"Id":"' + ID + '","Id":"' + 'c' * 64 + '"}]').encode()
         for body in (duplicate_key, b'{}', b'[] trailing', b'[true]',
