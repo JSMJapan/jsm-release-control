@@ -1,11 +1,14 @@
-"""Synthetic proc/systemd fixtures for #2760; no SSH, SQL or real /proc reads."""
+"""Synthetic fixtures plus Linux CI self proc-net; no SSH, SQL or daemon."""
 import copy
 import errno
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import tempfile
+import stat
+import sys
 import time
 from types import SimpleNamespace
 import unittest
@@ -430,6 +433,98 @@ class OsMetadataTests(unittest.TestCase):
             directory=root/'real';directory.mkdir();(directory/'file').write_text('PRIVATE')
             parent=root/'parent';parent.symlink_to(directory,target_is_directory=True)
             with self.assertRaises(OSError):self.ns['_proc_read'](str(parent/'file'),time.monotonic()+1)
+
+    def test_proc_read_accepts_only_own_unix_lookup_ctime_refresh_and_keeps_identity_guards(self):
+        own='/proc/'+str(os.getpid())
+        initial=dict(st_dev=9,st_ino=700,st_mode=stat.S_IFREG|0o444,
+            st_uid=0,st_gid=0,st_nlink=1,st_ctime_ns=100)
+        changes=dict(st_dev=10,st_ino=701,st_mode=stat.S_IFREG|0o400,
+            st_uid=1,st_gid=1,st_nlink=2,st_ctime_ns=101)
+        cases=[(own+'/net/unix',None,'st_ctime_ns',True)]
+        cases += [(own+'/net/unix',key,None,False) for key in changes]
+        cases += [(own+'/net/unix',None,key,False) for key in changes if key!='st_ctime_ns']
+        cases += [(path,None,'st_ctime_ns',False) for path in (
+            own+'/stat',own+'/mountinfo','/proc/'+str(os.getpid()+1)+'/net/unix',
+            '/proc/self/net/unix',own+'/net/unix/extra',own+'/net//unix',
+            own+'/net/./unix',own+'/net/../net/unix')]
+        for path,fd_change,path_change,accepted in cases:
+            with self.subTest(fd_change=fd_change,path_change=path_change,accepted=accepted):
+                after=dict(initial);final=dict(initial)
+                if fd_change:after[fd_change]=changes[fd_change]
+                if path_change:final[path_change]=changes[path_change]
+                data=io.BytesIO(b'synthetic-proc-unix\n');closed=[]
+                with patch.dict(self.ns,{'_parents':lambda *a:([40,41],'unix')}), \
+                        patch.object(self.ns['os'],'open',return_value=42), \
+                        patch.object(self.ns['os'],'fstat',side_effect=[SimpleNamespace(**initial),SimpleNamespace(**after)]), \
+                        patch.object(self.ns['os'],'stat',return_value=SimpleNamespace(**final)), \
+                        patch.object(self.ns['os'],'read',side_effect=lambda fd,size:data.read(size)), \
+                        patch.object(self.ns['os'],'close',side_effect=closed.append):
+                    if accepted:
+                        outcome=None;value=None
+                        try:value=self.ns['_proc_read'](path,time.monotonic()+1)
+                        except self.ns['MetadataRefused'] as error:outcome=error.code
+                        self.assertIsNone(outcome)
+                        self.assertEqual(value,'synthetic-proc-unix\n')
+                    else:
+                        with self.assertRaises(self.ns['MetadataRefused']) as caught:
+                            self.ns['_proc_read'](path,time.monotonic()+1)
+                        self.assertEqual(caught.exception.code,'CHANGED_DURING_READ')
+                self.assertEqual(closed,[42,41,40])
+
+    def test_own_unix_reader_still_bounds_refuses_denied_and_cleans_every_descriptor(self):
+        path='/proc/'+str(os.getpid())+'/net/unix'
+        before=SimpleNamespace(st_dev=9,st_ino=700,st_mode=stat.S_IFREG|0o444,
+            st_uid=0,st_gid=0,st_nlink=1,st_ctime_ns=100)
+        for case,expected in [('open','PERMISSION_REFUSED'),('read','PERMISSION_REFUSED'),
+                ('size','SIZE_LIMIT'),('deadline','DEADLINE'),('kind','UNSAFE_LINK_OR_KIND')]:
+            with self.subTest(case=case):
+                closed=[];data=io.BytesIO(b'X'*4097)
+                def read(fd,size):
+                    self.assertLessEqual(size,4096)
+                    if case=='read':raise PermissionError('PRIVATE')
+                    return data.read(size)
+                opened=PermissionError('PRIVATE') if case=='open' else lambda *a,**kw:42
+                value=copy.copy(before)
+                if case=='kind':value.st_mode=stat.S_IFLNK|0o777
+                with patch.dict(self.ns,{'_parents':lambda *a:([40,41],'unix')}), \
+                        patch.object(self.ns['os'],'open',side_effect=opened), \
+                        patch.object(self.ns['os'],'fstat',return_value=value), \
+                        patch.object(self.ns['os'],'read',side_effect=read), \
+                        patch.object(self.ns['os'],'close',side_effect=closed.append):
+                    with self.assertRaises((OSError,ValueError)) as caught:
+                        self.ns['_proc_read'](path,time.monotonic()+(-1 if case=='deadline' else 1),4096)
+                    self.assertEqual(self.ns['_error_code'](caught.exception),expected)
+                self.assertEqual(closed,[41,40] if case=='open' else [42,41,40])
+
+    @unittest.skipUnless(sys.platform=='linux','Native Linux proc-net lookup timestamps only')
+    def test_native_own_unix_reader_survives_real_lookup_timestamp_refresh(self):
+        # Real kernel metadata/content stay private. Only final stat is delayed;
+        # no metadata is fabricated, no daemon/socket/namespace is created.
+        original_stat,original_fstat=os.stat,os.fstat
+        held=[];lookups=[];outcome=None;valid=False
+        def fstat(fd):
+            value=original_fstat(fd);held.append(self.ns['_stamp'](value));return value
+        def separated_stat(path,*,dir_fd=None,follow_symlinks=True):
+            if path=='unix' and type(dir_fd)is int and follow_symlinks is False:
+                time.sleep(.05)  # Cross kernel timestamp ticks before fresh lookup.
+                value=original_stat(path,dir_fd=dir_fd,follow_symlinks=False)
+                lookups.append(self.ns['_stamp'](value));return value
+            return original_stat(path,dir_fd=dir_fd,follow_symlinks=follow_symlinks)
+        with patch.object(self.ns['os'],'stat',side_effect=separated_stat), \
+                patch.object(self.ns['os'],'fstat',side_effect=fstat):
+            try:
+                text=self.ns['_proc_read']('/proc/'+str(os.getpid())+'/net/unix',time.monotonic()+.75)
+                valid=type(text)is str and len(text.encode('utf-8'))<=65536 and text.startswith('Num')
+            except self.ns['MetadataRefused'] as error:
+                outcome=error.code
+            except Exception:
+                outcome='UNEXPECTED_NATIVE_READER_FAILURE'
+        self.assertTrue(len(held)==2 and len(lookups)==1,'NATIVE_STAT_COUNTS')
+        self.assertTrue(held[0]==held[1],'NATIVE_HELD_FD_CHANGED')
+        self.assertTrue(held[0][:-1]==lookups[0][:-1],'NATIVE_LOOKUP_IDENTITY_CHANGED')
+        self.assertTrue(held[0][-1]!=lookups[0][-1],'NATIVE_LOOKUP_CLOCK_TICK_NOT_OBSERVED')
+        self.assertIsNone(outcome,'Native bounded reader refused; closed reason only')
+        self.assertTrue(valid,'NATIVE_BOUNDED_HEADER_REQUIRED')
 
     def test_actual_metadata_directory_symlink_is_unknown_without_listing_or_contents(self):
         with tempfile.TemporaryDirectory(prefix='jsm-2760-offline-',dir=FIXTURE_TMP) as folder:
