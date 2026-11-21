@@ -1,3 +1,14 @@
+# 21.11.2026 — passive Docker discovery: SOURCE CORE ONLY, NOT_RUN
+
+[Approved plan7061532578](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7061532578),
+[owner CODE READY7061596354](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7061596354).
+This first reviewable chunk implements only bounded summary/HTTP parsers and
+synthetic refusal/privacy tests. The Docker socket connector, v4 integration and
+final reviews are still pending; existing runtime dispatch remains unchanged.
+The two new source/test paths were added to existing offline CI path filters;
+no operational job, protection, permission or workflow input was changed.
+No server/daemon/application/DB calls, merge or workflow dispatch occurred.
+
 # 21.11.2026 — уточнение fixed TEST OS metadata, child v3
 **SOURCE CANDIDATE / RUNTIME NOT_RUN / DB ADMISSION BLOCKED.** Продолжение
 [плана7060941419](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7060941419),
