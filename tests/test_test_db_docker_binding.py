@@ -107,6 +107,46 @@ class DockerBindingTests(unittest.TestCase):
             self.assertTrue(diagnostic[field],field)
         self.assertNotIn('PRIVATE',json.dumps([result,diagnostic]))
 
+    def test_running_active_socket_uses_full_same_fd_chain_and_one_get(self):
+        state=self.fixture();state['units']=UNITS.replace('SubState=listening','SubState=running')
+        packet,diagnostic,connection=self.call()
+        self.assertEqual(packet['state'],'OBSERVED');self.assertTrue(packet['attempted'])
+        self.assertEqual(len(connection.connected),1);self.assertEqual(len(connection.peer_reads),1)
+        self.assertEqual(len(connection.sent),1);self.assertEqual(diagnostic['state'],'PROVED')
+        self.assertTrue(diagnostic['before_proved']);self.assertTrue(diagnostic['after_stable'])
+
+    def test_listening_running_transition_after_get_is_still_unstable(self):
+        for start,end in [('listening','running'),('running','listening')]:
+            with self.subTest(start=start,end=end):
+                self.setUp();state=self.fixture();state['units']=UNITS.replace('SubState=listening','SubState='+start)
+                packet,diagnostic,connection=self.call(after=lambda:state.update(units=UNITS.replace('SubState=listening','SubState='+end)))
+                self.assertTrue(packet['attempted']);self.assertEqual(len(connection.sent),1)
+                self.assertEqual(packet['state'],'UNKNOWN');self.assertEqual(packet['containers'],[])
+                self.assertEqual(diagnostic['reason'],'BINDING_CHANGED');self.assertFalse(diagnostic['after_stable'])
+
+    def test_unit_failure_reasons_distinguish_query_schema_and_each_predicate_privately(self):
+        cases=[('query',None,'UNIT_QUERY_REFUSED'),
+            ('schema',UNITS.replace('Id=docker.socket','Id=docker.socket\nId=docker.socket'),'UNIT_SCHEMA_REFUSED'),
+            ('missing',UNITS.replace('Listen=/run/docker.sock (Stream)\n',''),'UNIT_SCHEMA_REFUSED'),
+            ('socket_state',UNITS.replace('SubState=listening','SubState=dead'),'SOCKET_STATE_REFUSED'),
+            ('service_state',UNITS.replace('SubState=running','SubState=dead'),'SERVICE_STATE_REFUSED'),
+            ('accept',UNITS.replace('Accept=no','Accept=yes'),'SOCKET_ACCEPT_REFUSED'),
+            ('listen',UNITS.replace('/run/docker.sock (Stream)','/PRIVATE/socket (Stream)'),'SOCKET_LISTEN_REFUSED'),
+            ('socket_trigger',UNITS.replace('Triggers=docker.service','Triggers=PRIVATE.service'),'SOCKET_TRIGGER_REFUSED'),
+            ('service_trigger',UNITS.replace('TriggeredBy=docker.socket','TriggeredBy=PRIVATE.socket'),'SERVICE_TRIGGER_REFUSED'),
+            ('service_properties',UNITS+'Accept=yes\n','SERVICE_PROPERTIES_REFUSED')]
+        for case,text,reason in cases:
+            with self.subTest(case=case):
+                self.setUp();state=self.fixture()
+                if text is None:
+                    def refused(*args):raise OSError('PRIVATE_UNIT_QUERY')
+                    self.ns['_systemctl_snapshot']=refused
+                else:state['units']=text
+                packet,diagnostic,connection=self.call()
+                self.assertFalse(packet['attempted']);self.assertEqual(connection.sent,[])
+                self.assertEqual(diagnostic['state'],'UNKNOWN');self.assertEqual(diagnostic['reason'],reason)
+                self.assertNotIn('PRIVATE',json.dumps([packet,diagnostic]))
+
     def test_bad_uid_or_peer_kind_does_not_read_association_or_send_get(self):
         self.fixture();self.ns['_systemctl_snapshot']=lambda *args:self.fail('bad peer reached association')
         for peer,reason in [((1,1000,0),'PEER_UID_REFUSED'),((405,0,0),'PEER_PID_REFUSED')]:
@@ -321,7 +361,7 @@ class DockerBindingTests(unittest.TestCase):
         value=self.ns['_binding_units'](UNITS)
         self.assertEqual(value['socket']['Listen'],'/run/docker.sock (Stream)')
         for bad in [UNITS.replace('Accept=no','Accept=yes'),
-                UNITS.replace('SubState=listening','SubState=running'),
+                UNITS.replace('SubState=listening','SubState=dead'),
                 UNITS.replace('Triggers=docker.service','Triggers=PRIVATE.service'),
                 UNITS.replace('TriggeredBy=docker.socket','TriggeredBy=PRIVATE.socket'),
                 UNITS.replace('Listen=/run/docker.sock (Stream)','Listen=/run/docker.sock (Stream) /PRIVATE.sock (Stream)'),

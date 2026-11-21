@@ -1,3 +1,37 @@
+# 21.11.2026 — correct active socket states and closed unit refusal reasons
+
+**SOURCE REPAIR / RUNTIME NOT_RUN.** Continuation of the same approved
+[plan7061948273](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7061948273),
+[owner CODE READY7061957410](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7061957410)
+and [repair claim7062397103](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7062397103).
+Base control main `f80563dbe4cd21c6898ad0dc9518e642b58d906e`.
+
+Systemd [v255 socket state table](https://github.com/systemd/systemd/blob/v255/src/core/socket.c#L63)
+and the current upstream table both classify LISTENING and RUNNING as ACTIVE.
+The parser formerly rejected the legitimate stable running socket even when
+all other positive predicates held. It now permits exactly listening/running
+for the loaded/active fixed docker.socket. Original SubState values remain in
+the private before/after stamp: a transition between these states still refuses
+post-GET results and preserves attempted=true. No other predicate is relaxed.
+
+The actual12:09:12 receipt/run44902405163 established root/PID1 peer but only
+UNIT_RELATION_REFUSED; it does not establish that TEST had the running state.
+Query/transport refusal, schema refusal and precise socket/service state,
+Accept, Listen, trigger/role-property predicates now have separate closed
+reason enums. Legacy UNIT_RELATION_REFUSED remains schema-compatible. No raw
+unit values, text, metadata, new fields, targets, properties or calls are added.
+All old process/FD/peer/socket/namespace checks,0.75/3/4/5s caps, one connected-fd
+GET and SQL barrier are unchanged. This is a parser correctness/diagnostic fix,
+not a new runtime permission. Merge/run remain separate exact owner decisions.
+
+RED: stable running full-chain refused; listening/running transitions lacked
+correct stability classification; query/schema/predicate reasons were lumped.
+GREEN checks execute the actual parser→same-connection proof→GET→finish path,
+retain zero-GET on refusal, and keep private markers out of output. The old
+negative fixture using running was corrected to dead; explicit positive and
+bidirectional transition checks now cover the legitimate states. Full exact
+counts/CI and root+B reviews are recorded in the PR, with no TEST/prod claim.
+
 # 21.11.2026 — positive systemd socket binding before the same GET, child v5
 
 **SOURCE CANDIDATE / RUNTIME NOT_RUN / DB ADMISSION BLOCKED.**
@@ -23,7 +57,7 @@ not send GET. There is no reconnect, retry, CLI, TCP or PID1-only acceptance.
 
 Before the fixed existing GET, the new branch requires all of:
 
-- loaded/active docker.socket, SubState=listening, Accept=no, exactly one
+- loaded/active docker.socket, SubState=listening or running, Accept=no, exactly one
   `/run/docker.sock (Stream)` and Triggers=docker.service; reciprocal loaded/
   active/running docker.service with TriggeredBy=docker.socket. One fixed query
   shape Id/LoadState/ActiveState/SubState/Accept/Listen/Triggers/TriggeredBy uses
