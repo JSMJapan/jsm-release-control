@@ -72,7 +72,13 @@ def _proc_read(path,deadline,limit=65536):
             data.extend(chunk)
             if len(data)>limit:raise MetadataRefused('SIZE_LIMIT')
         # procfs reports size zero; exact length is intentionally not compared.
-        if _stamp(before)!=_stamp(os.fstat(fd)) or _stamp(before)!=_stamp(os.stat(name,dir_fd=fds[-1],follow_symlinks=False)):raise MetadataRefused('CHANGED_DURING_READ')
+        held=_stamp(before)
+        if held!=_stamp(os.fstat(fd)):raise MetadataRefused('CHANGED_DURING_READ')
+        pathname=_stamp(os.stat(name,dir_fd=fds[-1],follow_symlinks=False))
+        own=os.getpid()
+        # A fresh proc-net lookup re-instantiates timestamps, not the held FD.
+        own_unix=_pid_ready(own) and path=='/proc/'+str(own)+'/net/unix'
+        if (held[:-1]!=pathname[:-1] if own_unix else held!=pathname):raise MetadataRefused('CHANGED_DURING_READ')
         return data.decode('utf-8')
     finally:
         if fd is not None:os.close(fd)
