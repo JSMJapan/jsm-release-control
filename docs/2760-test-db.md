@@ -1,3 +1,38 @@
+# 21.11.2026 — closed FD refusal categories without changing the scan
+
+**SOURCE REPORTING REPAIR / RUNTIME NOT_RUN.** Existing #2760 scope,
+[claim7062991250](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7062991250),
+base `9f13dbbfabdc20b1b17347e73c44c8fd50692c08`.
+
+Actual [run44906512187](https://github.com/JSMJapan/jsm-release-control/actions/runs/44906512187)
+at12:59:19UTC confirmed policy/SSH/root, unix begin/end, unit_relation,
+listener_unique and init_expected, then FD_REFUSED before Docker identity/GET.
+Source order and independent actual-helper fixtures localize this to the first
+PID1 FD scan. Its actual cause, entry count, permission and churn remain UNKNOWN;
+no behavior bug or missing listener is established. This is reporting precision,
+not a relaxation of the guard or proof of TEST DB identity/isolation.
+
+Six closed values refine the existing binding.reason: FD_ENTRY_LIMIT,
+FD_TARGET_LIMIT, FD_NAME_REFUSED, FD_NOT_FOUND, FD_PERMISSION_REFUSED and
+FD_OS_REFUSED. Unknown errors stay FD_REFUSED; designated DEADLINE stays distinct.
+The reader privately annotates an existing exception and re-raises the same
+object with the same type/args. Legacy v2/v3 catches and `_error_code` outcomes
+are unchanged. Cleanup errors retain their former precedence and stop order.
+No raw errno/message/count/FD name/path/target or new public field is emitted.
+
+The complete existing scan still stops at entry129, a malformed numeric name,
+target4097, unavailable/read-denied FD, deadline or OS/cleanup failure. No extra
+read, PID/FD discovery, property, request, retry, skipping or cap/budget change.
+Listener/namespace/process before-after proof, same connected-fd GET and SQL
+barrier are unchanged. Existing generic FD_REFUSED remains schema-compatible.
+
+RED on the prior actual helper→begin/finish/projector loses the six categories;
+GREEN exercises that same path with every refusal GET0/UNKNOWN, exact exception
+identity/type/args, legacy error categories, original cutoff/read/cleanup counts
+and private/multi-argument/unknown reason canaries. The normal same-FD positive
+control remains one GET. Exact full-suite/CI counts and two non-author reviews
+belong in the PR; no merge or new runtime is authorized by this source repair.
+
 # 21.11.2026 — exact own proc-net identity across fresh kernel lookup
 
 **SOURCE REPAIR / TEST RUNTIME NOT_RUN.** Existing #2760 scope and

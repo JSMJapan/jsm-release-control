@@ -10,7 +10,8 @@ REASONS=('NONE','NOT_ATTEMPTED','PEER_SCHEMA_REFUSED','PEER_UID_REFUSED','PEER_P
     'DEADLINE','OS_REFUSED','PROC_REFUSED','UNIT_UNAVAILABLE','PATH_REFUSED','UNSUPPORTED',
     'UNIT_QUERY_REFUSED','UNIT_SCHEMA_REFUSED','SOCKET_STATE_REFUSED','SERVICE_STATE_REFUSED',
     'SOCKET_ACCEPT_REFUSED','SOCKET_LISTEN_REFUSED','SOCKET_TRIGGER_REFUSED',
-    'SERVICE_TRIGGER_REFUSED','SERVICE_PROPERTIES_REFUSED')
+    'SERVICE_TRIGGER_REFUSED','SERVICE_PROPERTIES_REFUSED',
+    'FD_ENTRY_LIMIT','FD_TARGET_LIMIT','FD_NAME_REFUSED','FD_NOT_FOUND','FD_PERMISSION_REFUSED','FD_OS_REFUSED')
 BOOLEANS=('peer_root','unit_relation','init_expected','docker_expected','namespaces_match',
     'listener_unique','init_has_listener','docker_has_listener','before_proved','after_stable')
 
@@ -91,7 +92,9 @@ def _binding_process(role,pid,deadline,axes):
     try:
         _docker_remaining(deadline);sockets=_fd_sockets(pid,deadline)
     except Exception as error:
-        raise BindingRefused('DEADLINE' if getattr(error,'code',None)=='DEADLINE' else 'FD_REFUSED') from None
+        reason=getattr(error,'fd_reason',None)
+        if type(reason)is not str or not reason.startswith('FD_') or reason not in BINDING_REASONS:reason='FD_REFUSED'
+        raise BindingRefused('DEADLINE' if getattr(error,'code',None)=='DEADLINE' else reason) from None
     if identity!=_binding_identity(role,pid,deadline,axes):raise BindingRefused('BINDING_CHANGED')
     return identity,sockets
 def _binding_snapshot(unit,deadline,axes):
