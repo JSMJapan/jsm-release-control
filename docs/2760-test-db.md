@@ -1,3 +1,34 @@
+# 21.11.2026 — preserve existing closed public GitHub refusal reasons
+
+**SOURCE REPAIR / RUNTIME NOT_RUN.** Same approved #2760 diagnostics scope;
+[continuation claim7062586786](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7062586786).
+Base control main `ea18e66e03443cfdff8a6b90b96bba9a1d5e066d`.
+
+The authorized [run44903725134](https://github.com/JSMJapan/jsm-release-control/actions/runs/44903725134)
+returned TEST_DB_SCOPE_REJECTED at12:25:09UTC, protected_policy_verified=false,
+SSH/SQL NOT_ATTEMPTED and os_observation=null. No TEST or Docker call occurred;
+the corrected socket parser was not exercised. The historical endpoint, HTTP
+status and underlying cause remain UNKNOWN. This receipt does not prove a
+policy change, rate limit, GitHub outage or parser failure. Fresh successful
+public/authenticated policy reads do not establish the old runner response.
+
+The three existing public policy GETs can already raise nine closed Refused
+codes: FIXED_GITHUB_GET_SCOPE_REQUIRED and eight GITHUB_* reasons for deadline,
+socket, status, content type, encoding, size, length and transport/schema.
+The DB receipt previously replaced these codes with TEST_DB_SCOPE_REJECTED.
+Only these nine existing codes are added to its SAFE_REASONS. No new fields,
+stages, requests, targets, headers, authentication, retries or limits are added;
+shared GET/SSH transports, policy predicates and every operational workflow
+are unchanged. Unknown/non-Refused/multi-argument/non-string errors stay generic.
+Raw exceptions, HTTP status/body/headers and private data are never emitted.
+
+Offline RED on the prior source reproduces the lost codes; GREEN exercises
+main→collect→policy GET refusal at each of the three positions. It preserves
+BLOCKED/exit1, policy=false, SSH/SQL NOT_ATTEMPTED, credentials NOT_ACCESSED and
+os_observation=null, with no credential/transport side effects or private output.
+Exact local/CI counts and two non-author frozen-head reviews belong in the PR.
+No merge or new one-shot is authorized by this source repair.
+
 # 21.11.2026 — correct active socket states and closed unit refusal reasons
 
 **SOURCE REPAIR / RUNTIME NOT_RUN.** Continuation of the same approved

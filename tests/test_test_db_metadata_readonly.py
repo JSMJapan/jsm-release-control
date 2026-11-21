@@ -13,6 +13,10 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / 'scripts/test_db_metadata_readonly.py'
+GITHUB_GET_REASONS = ('FIXED_GITHUB_GET_SCOPE_REQUIRED', 'GITHUB_READ_DEADLINE',
+    'GITHUB_SOCKET_REQUIRED', 'GITHUB_GET_STATUS_REFUSED', 'GITHUB_JSON_CONTENT_TYPE_REQUIRED',
+    'GITHUB_ENCODING_REFUSED', 'GITHUB_RESPONSE_LIMIT', 'GITHUB_RESPONSE_LENGTH_MISMATCH',
+    'GITHUB_TRANSPORT_OR_SCHEMA_REFUSED')
 
 
 class DbScopeBarrierTests(unittest.TestCase):
@@ -42,7 +46,7 @@ class ScopePolicyTests(unittest.TestCase):
             GITHUB_SHA='a' * 40, GITHUB_WORKFLOW_SHA='a' * 40, GITHUB_RUN_ID='123456789',
             GITHUB_WORKFLOW_REF='JSMJapan/jsm-release-control/.github/workflows/test-db-metadata-readonly.yml@refs/heads/main')
 
-    def api(self, mutate=None, fail_at=None):
+    def api(self, mutate=None, fail_at=None, failure=None):
         rows = [dict(full_name='JSMJapan/jsm-release-control', private=False),
             dict(name='test-api-readonly-access', can_admins_bypass=False,
                 protection_rules=[dict(type='required_reviewers', prevent_self_review=False,
@@ -56,6 +60,8 @@ class ScopePolicyTests(unittest.TestCase):
             def get_json(inner, path):
                 calls.append(path)
                 if len(calls) - 1 == fail_at:
+                    if failure is not None:
+                        raise failure
                     raise RuntimeError('PRIVATE mysql://user:password@production/customer')
                 return copy.deepcopy(rows[len(calls) - 1])
         return Api(), calls
@@ -136,6 +142,58 @@ class ScopePolicyTests(unittest.TestCase):
             with self.assertRaises(Exception) as raised:
                 self.m.collect(api, self.context())
             self.assertEqual(self.m.safe_reason(raised.exception), 'TEST_DB_SCOPE_REJECTED')
+
+    def test_existing_closed_github_get_reasons_survive_without_accepting_private_errors(self):
+        for reason in GITHUB_GET_REASONS:
+            with self.subTest(reason=reason):
+                self.assertEqual(self.m.safe_reason(self.m.Refused(reason)), reason)
+                multi, empty = self.m.Refused('PRIVATE'), self.m.Refused('PRIVATE')
+                multi.args, empty.args = (reason, 'PRIVATE'), ()
+                for error in (RuntimeError(reason), multi,
+                        self.m.Refused(reason + ': PRIVATE'), self.m.Refused([reason]),
+                        empty, self.m.Refused('GITHUB_PRIVATE_UNRECOGNIZED')):
+                    self.assertEqual(self.m.safe_reason(error), 'TEST_DB_SCOPE_REJECTED')
+
+    def test_main_policy_get_refusals_preserve_closed_reason_and_stop_before_credentials(self):
+        class SecretTrap(dict):
+            def get(inner, key, default=None):
+                if key.startswith('TEST_') or 'SECRET' in key or 'PASSWORD' in key:
+                    raise AssertionError('PRIVATE credential read before policy verification')
+                return super().get(key, default)
+        failures = [(reason, self.m.Refused(reason)) for reason in GITHUB_GET_REASONS]
+        multi, empty = self.m.Refused('PRIVATE'), self.m.Refused('PRIVATE')
+        multi.args, empty.args = ('GITHUB_GET_STATUS_REFUSED', 'PRIVATE'), ()
+        failures.extend(('TEST_DB_SCOPE_REJECTED', error) for error in (
+            RuntimeError('GITHUB_GET_STATUS_REFUSED'), self.m.Refused('GITHUB_PRIVATE'),
+            self.m.Refused('GITHUB_RESPONSE_LIMIT: PRIVATE'), multi,
+            self.m.Refused(['GITHUB_GET_STATUS_REFUSED', 'PRIVATE']),
+            self.m.Refused('DUPLICATE_JSON_FIELD'), empty,
+            RuntimeError('PRIVATE mysql://user:password@production/customer')))
+        for index in range(3):
+            for reason, failure in failures:
+                with self.subTest(index=index, reason=reason):
+                    api, calls = self.api(fail_at=index, failure=failure)
+                    out, err = io.StringIO(), io.StringIO()
+                    with patch.object(self.m, 'TestPolicyApi', return_value=api), \
+                            patch.object(self.m, '_bounded', side_effect=AssertionError('PRIVATE SSH attempted')), \
+                            patch.object(self.m, 'private_file', side_effect=AssertionError('PRIVATE key copied')), \
+                            patch.object(self.m.sys, 'argv', [str(SCRIPT)]), \
+                            patch.object(self.m.os, 'environ', SecretTrap(self.context())), \
+                            patch('sys.stdout', out), patch('sys.stderr', err):
+                        self.assertEqual(self.m.main(), 1)
+                    value = json.loads(out.getvalue())
+                    self.assertEqual(value['reason'], reason)
+                    self.assertEqual(len(calls), index + 1)
+                    self.assertEqual(value['status'], 'BLOCKED')
+                    self.assertIs(value['protected_policy_verified'], False)
+                    self.assertEqual(value['db_proof'], 'NOT_ESTABLISHED')
+                    self.assertEqual(value['ssh'], 'NOT_ATTEMPTED')
+                    self.assertEqual(value['sql'], 'NOT_ATTEMPTED')
+                    self.assertEqual(value['database_credentials'], 'NOT_ACCESSED')
+                    self.assertIsNone(value['os_observation'])
+                    self.assertIsNone(value['sudo_root_identity'])
+                    self.assertNotIn('PRIVATE', out.getvalue())
+                    self.assertEqual(err.getvalue(), '')
 
     def test_misleading_policy_fields_and_source_records_do_not_become_evidence(self):
         def mutate(rows):
