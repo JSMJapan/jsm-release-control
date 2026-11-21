@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import unittest
 import copy
+import errno
 import os
 import socket
 import sys
@@ -147,6 +148,18 @@ class DockerBindingTests(unittest.TestCase):
                 self.assertEqual(diagnostic['state'],'UNKNOWN');self.assertEqual(diagnostic['reason'],reason)
                 self.assertNotIn('PRIVATE',json.dumps([packet,diagnostic]))
 
+    def test_unknown_private_or_nonstrings_cannot_become_public_fd_reasons(self):
+        for value in (None,'PRIVATE','DEADLINE',['FD_ENTRY_LIMIT'],('FD_ENTRY_LIMIT','PRIVATE'),True):
+            with self.subTest(kind=type(value).__name__):
+                self.setUp();self.fixture();error=RuntimeError('PRIVATE','SECOND_PRIVATE');error.fd_reason=value
+                def refused(*args):raise error
+                self.ns['_fd_sockets']=refused
+                packet,diagnostic,connection=self.call()
+                self.assertEqual(diagnostic['reason'],'FD_REFUSED');self.assertFalse(packet['attempted'])
+                self.assertEqual(packet['containers'],[]);self.assertEqual(connection.sent,[])
+                self.assertIsNotNone(self.binding.project_binding(diagnostic,packet))
+                self.assertNotIn('PRIVATE',json.dumps([packet,diagnostic]))
+
     def test_bad_uid_or_peer_kind_does_not_read_association_or_send_get(self):
         self.fixture();self.ns['_systemctl_snapshot']=lambda *args:self.fail('bad peer reached association')
         for peer,reason in [((1,1000,0),'PEER_UID_REFUSED'),((405,0,0),'PEER_PID_REFUSED')]:
@@ -239,6 +252,90 @@ class DockerBindingTests(unittest.TestCase):
         self.assertIsNone(diagnostic['namespaces_match']);self.assertFalse(result['attempted'])
         self.assertEqual(connection.sent,[]);self.assertNotIn('PRIVATE',json.dumps(diagnostic))
 
+    def test_actual_fd_reader_failures_keep_cutoffs_exceptions_and_closed_reasons(self):
+        class Entries:
+            def __init__(inner,names,broken):inner.names,inner.broken=names,broken
+            def __enter__(inner):return inner.rows()
+            def rows(inner):
+                for index,name in enumerate(inner.names):
+                    if inner.broken and index:raise OSError(errno.EIO,'PRIVATE_ITERATION')
+                    yield SimpleNamespace(name=name)
+            def __exit__(inner,*args):pass
+        cases=[('normal','NONE',None),('cap','FD_ENTRY_LIMIT','PARSE_OR_GUARD_REFUSED'),
+            ('name','FD_NAME_REFUSED','PARSE_OR_GUARD_REFUSED'),
+            ('size','FD_TARGET_LIMIT','PARSE_OR_GUARD_REFUSED'),
+            ('missing','FD_NOT_FOUND','NOT_FOUND'),('permission','FD_PERMISSION_REFUSED','PERMISSION_REFUSED'),
+            ('parents','FD_PERMISSION_REFUSED','PERMISSION_REFUSED'),('open','FD_PERMISSION_REFUSED','PERMISSION_REFUSED'),
+            ('scandir','FD_OS_REFUSED','OS_REFUSED'),('iterate','FD_OS_REFUSED','OS_REFUSED'),
+            ('close','FD_OS_REFUSED','OS_REFUSED'),('private','FD_REFUSED','PARSE_OR_GUARD_REFUSED'),
+            ('unknown_reason','FD_REFUSED','PARSE_OR_GUARD_REFUSED'),('deadline','DEADLINE','DEADLINE')]
+        for case,expected,legacy in cases:
+            with self.subTest(case=case):
+                self.setUp();actual=self.ns['_fd_sockets'];self.fixture();fallback=self.ns['_fd_sockets']
+                seen=[];links=[];closed=[];caught=[]
+                error=(FileNotFoundError(errno.ENOENT,'PRIVATE_FD') if case=='missing'
+                    else PermissionError(errno.EACCES,'PRIVATE_FD') if case in ('permission','parents','open')
+                    else OSError(errno.EIO,'PRIVATE_IO') if case in ('scandir','close')
+                    else self.ns['MetadataRefused']('DEADLINE') if case=='deadline'
+                    else RuntimeError('PRIVATE','SECOND_PRIVATE'))
+                error.fd_reason=('PRIVATE' if case=='unknown_reason' else ('FD_ENTRY_LIMIT','PRIVATE'))
+                original_type,original_args=type(error),error.args
+                def reader(pid,deadline):
+                    seen.append(pid)
+                    if pid!=1:return fallback(pid,deadline)
+                    names=[str(i) for i in range(129)] if case=='cap' else ['PRIVATE'] if case=='name' else ['1','2']
+                    def parents(*args):
+                        if case=='parents':raise error
+                        return [40,41],'fd'
+                    def opened(*args,**kwargs):
+                        if case=='open':raise error
+                        return 42
+                    def scan(*args):
+                        if case=='scandir':raise error
+                        return Entries(names,case=='iterate')
+                    def link(name,**kwargs):
+                        links.append(name)
+                        if case in ('missing','permission','private','unknown_reason'):raise error
+                        return 'X'*4097 if case=='size' else 'socket:[7003]'
+                    def close(fd):
+                        closed.append(fd)
+                        if case=='close':raise error
+                    def check(*args):
+                        if case=='deadline':raise error
+                    with patch.dict(self.ns,{'_parents':parents,'_check':check}), \
+                            patch.object(self.ns['os'],'open',side_effect=opened), \
+                            patch.object(self.ns['os'],'scandir',side_effect=scan), \
+                            patch.object(self.ns['os'],'readlink',side_effect=link), \
+                            patch.object(self.ns['os'],'close',side_effect=close):
+                        try:return actual(pid,deadline)
+                        except Exception as failure:caught.append(failure);raise
+                self.ns['_fd_sockets']=reader
+                packet,diagnostic,connection=self.call()
+                self.assertEqual(diagnostic['reason'],expected)
+                self.assertIsNotNone(self.binding.project_binding(diagnostic,packet))
+                if case=='normal':
+                    self.assertEqual(packet['state'],'OBSERVED');self.assertEqual(len(connection.sent),1)
+                    self.assertEqual(seen,[1,404,1,404]);self.assertEqual(caught,[])
+                else:
+                    self.assertEqual(packet['state'],'UNKNOWN');self.assertFalse(packet['attempted'])
+                    self.assertEqual(connection.sent,[]);self.assertEqual(packet['containers'],[])
+                    self.assertEqual(seen,[1]);self.assertEqual(len(caught),1)
+                    self.assertEqual(self.ns['_error_code'](caught[0]),legacy)
+                    self.assertTrue(diagnostic['init_expected']);self.assertTrue(diagnostic['listener_unique'])
+                    for field in ('docker_expected','init_has_listener','docker_has_listener','namespaces_match','before_proved','after_stable'):
+                        self.assertIsNone(diagnostic[field])
+                    if case in ('cap','name','size'):
+                        self.assertIs(type(caught[0]),ValueError);self.assertEqual(caught[0].args,())
+                    elif case!='iterate':
+                        self.assertIs(caught[0],error);self.assertIs(type(error),original_type)
+                        self.assertEqual(error.args,original_args)
+                if case=='cap':self.assertEqual(len(links),128)
+                if case=='name':self.assertEqual(links,[])
+                if case in ('missing','permission','private','unknown_reason'):self.assertEqual(len(links),1)
+                self.assertEqual(closed,[] if case=='parents' else [41,40] if case=='open'
+                    else [42] if case=='close' else [42,41,40] if case!='normal' else [42,41,40,42,41,40])
+                self.assertNotIn('PRIVATE',json.dumps([packet,diagnostic]))
+
     def test_preproof_and_postproof_share_initial_absolute_deadline(self):
         now=[0.0];self.fixture()
         def late_query(*args):now[0]=.8;return UNITS
@@ -266,7 +363,7 @@ class DockerBindingTests(unittest.TestCase):
         self.assertTrue(hasattr(self.binding,'project_binding'),'closed binding projector is missing')
         self.fixture();packet,diagnostic,_=self.call()
         self.assertEqual(self.binding.project_binding(diagnostic,packet),diagnostic)
-        for case in ('raw','integer','root','kind','after','missing'):
+        for case in ('raw','integer','root','kind','after','missing','reason','reason_list'):
             value=copy.deepcopy(diagnostic)
             if case=='raw':value['raw_unit']='PRIVATE'
             if case=='integer':value['init_has_listener']=1
@@ -274,6 +371,8 @@ class DockerBindingTests(unittest.TestCase):
             if case=='kind':value['peer_kind']='OTHER'
             if case=='after':value['after_stable']=None
             if case=='missing':del value['unit_relation']
+            if case=='reason':value['reason']='PRIVATE'
+            if case=='reason_list':value['reason']=['FD_ENTRY_LIMIT']
             self.assertIsNone(self.binding.project_binding(value,packet),case)
         self.setUp();self.fixture();packet,diagnostic,_=self.call(unit=dict(load='not-found',active='inactive',pid=0))
         self.assertIsNotNone(self.binding.project_binding(diagnostic,packet))

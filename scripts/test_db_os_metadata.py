@@ -182,8 +182,17 @@ def _proc_start(text,pid):
     return int(fields[19])
 def _pid_ready(pid):
     return type(pid)is int and 0<pid<=2147483647
+def _fd_classify(error,reason=None):
+    # Private annotation only: preserve the original exception type/args and
+    # legacy OS catches. Raw names, targets, counts and messages never enter it.
+    if reason not in ('FD_ENTRY_LIMIT','FD_NAME_REFUSED','FD_TARGET_LIMIT'):
+        reason=('FD_NOT_FOUND' if isinstance(error,FileNotFoundError) else
+            'FD_PERMISSION_REFUSED' if isinstance(error,PermissionError) else
+            'FD_OS_REFUSED' if isinstance(error,OSError) else 'FD_REFUSED')
+    try:error.fd_reason=reason
+    except Exception:pass
 def _fd_sockets(pid,deadline):
-    fds=[];fd=None;found=set();count=0
+    fds=[];fd=None;found=set();count=0;reason=None
     try:
         if not _pid_ready(pid):raise ValueError()
         fds,name=_parents('/proc/'+str(pid)+'/fd',deadline)
@@ -191,15 +200,23 @@ def _fd_sockets(pid,deadline):
         with os.scandir(fd) as entries:
             for entry in entries:
                 _check(deadline);count+=1
-                if count>128 or not re.fullmatch('[0-9]{1,10}',entry.name):raise ValueError()
+                if count>128:reason='FD_ENTRY_LIMIT';raise ValueError()
+                if not re.fullmatch('[0-9]{1,10}',entry.name):reason='FD_NAME_REFUSED';raise ValueError()
                 target=os.readlink(entry.name,dir_fd=fd)
-                if len(target)>4096:raise ValueError()
+                if len(target)>4096:reason='FD_TARGET_LIMIT';raise ValueError()
                 match=re.fullmatch(r'socket:\[([0-9]{1,20})\]',target)
                 if match:found.add(int(match[1]))
         return found
+    except Exception as error:
+        _fd_classify(error,reason)
+        raise
     finally:
-        if fd is not None:os.close(fd)
-        for directory in reversed(fds):os.close(directory)
+        try:
+            if fd is not None:os.close(fd)
+            for directory in reversed(fds):os.close(directory)
+        except Exception as error:
+            _fd_classify(error)
+            raise
 def _proc_snapshot(role,pid,deadline):
     result=dict(state='unknown',start=None,exe_matches=None,namespace_matches=None,
         net_namespace_matches=None,mount_namespace_matches=None,sockets=set())
