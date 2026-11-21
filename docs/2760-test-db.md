@@ -1,3 +1,45 @@
+# 21.11.2026 — exact own proc-net identity across fresh kernel lookup
+
+**SOURCE REPAIR / TEST RUNTIME NOT_RUN.** Existing #2760 scope and
+[continuation claim7062786326](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7062786326),
+base `a6ec6f3f37451910d8b4932d3d469e79e64adbdc`.
+
+Linux [proc-net revalidation](https://github.com/torvalds/linux/blob/v6.12/fs/proc/generic.c#L324)
+and [proc_get_inode](https://github.com/torvalds/linux/blob/v6.12/fs/proc/inode.c#L588)
+can re-instantiate a pathname inode with the same low_ino and fresh timestamps.
+The prior reader compared this new lookup ctime to the held FD, falsely treating
+that timestamp alone as object drift. Actual [run44904965462](https://github.com/JSMJapan/jsm-release-control/actions/runs/44904965462)
+established policy/SSH/root and unit_relation=true, then PROC_REFUSED/GET0/SQL0.
+Its failed attribute and actual cause remain UNKNOWN; this source finding is
+not proof that TEST changed only ctime or that any later binding proof passes.
+
+Only `_proc_read` changes: full held-FD before/after stamp, including ctime,
+must still match. Only the exact internally derived typed current-PID path
+`/proc/<os.getpid()>/net/unix` compares final dirfd-relative no-follow pathname
+by the same dev/ino/mode/uid/gid/nlink fields, excluding its refreshed ctime.
+No prefix, alias, caller flag or other-PID exception exists. `_stamp`, `_readlink`,
+stat/mountinfo/other paths and all type/link/nofollow/size/deadline/cleanup guards
+are unchanged. No new property, file target, request, protection, retry or budget;
+the existing current-process PID identity is reused. Listener, dual FD/process/
+namespace before-after proofs, one connected-fd GET and SQL barrier remain intact.
+
+Test-only draft commit b3865bc ran the unchanged reader in actual Linux
+[CI44905646333](https://github.com/JSMJapan/jsm-release-control/actions/runs/44905646333):
+263 tests,2 expected assertion failures,2 private skips. One failure used real
+own proc-net open/read/fstat/stat with a50ms final-stat delay: held FD stable,
+six pathname identity fields equal, fresh pathname ctime, then the prior reader
+returned CHANGED_DURING_READ. The other was the synthetic pathname-ctime-only case.
+No legacy implementation was reconstructed and no metadata was fabricated.
+
+Final tests retain that native Linux regression and all mismatch negatives:
+every held-FD stamp field including ctime, every other pathname identity field,
+nonexact/otherPID/stat/mountinfo/alias paths, denied open/read, type/size/deadline,
+symlink parents/leaves and descriptor cleanup. Real CI proc data remain only in
+memory; assertions emit closed booleans/reasons, never raw table content.
+Darwin explicitly skips the Linux-only fixture. Final counts/CI and two exact-head
+non-author reviews are recorded in the PR; new TEST run/merge require a separate
+owner decision. No server/TEST/Docker/provider/SQL request was made for this fix.
+
 # 21.11.2026 — preserve existing closed public GitHub refusal reasons
 
 **SOURCE REPAIR / RUNTIME NOT_RUN.** Same approved #2760 diagnostics scope;
