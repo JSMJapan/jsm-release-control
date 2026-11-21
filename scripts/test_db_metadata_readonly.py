@@ -24,6 +24,7 @@ from test_api_readonly_access import TestPolicyApi, PIN_SHA256, private_file, _p
 from test_api_installed_route_readonly import wrap_root_program
 from test_db_os_metadata import LIBRARY, STAGE_IDS, STAGE_ERRORS, DETAIL_STAGE_IDS, DETAIL_STAGE_ERRORS
 from test_db_docker_metadata import LIBRARY as DOCKER_LIBRARY, project_discovery
+from test_db_docker_binding import LIBRARY as BINDING_LIBRARY, project_binding
 
 REPO = 'JSMJapan/jsm-release-control'
 GH_REPO = '/repos/' + REPO
@@ -102,7 +103,7 @@ def need(value, reason):
 
 def remote_program(nonce):
     need(type(nonce) is str and re.fullmatch('[0-9a-f]{32}',nonce), 'NONCE_REQUIRED')
-    child=LIBRARY+DOCKER_LIBRARY+'\nprint(json.dumps(_observe('+repr(nonce)+',details=True,discovery=True),separators=(",",":"),sort_keys=True))\n'
+    child=LIBRARY+DOCKER_LIBRARY+BINDING_LIBRARY+'\nprint(json.dumps(_observe('+repr(nonce)+',details=True,discovery=True,binding=True),separators=(",",":"),sort_keys=True))\n'
     return wrap_root_program(nonce,child)
 
 
@@ -111,17 +112,20 @@ def _child_projection(child, nonce):
     # not forwarded, even if the remote capsule malfunctions.
     fields={'version','nonce','euid','observation_state','processes','sockets','datadir','stages',
         'effective_api_binding','test_disk_identity','db_proof','sql'}
-    detailed=type(child)is dict and child.get('version') in ('jsm-test-db-os-2760-v3','jsm-test-db-os-2760-v4')
-    discovery=type(child)is dict and child.get('version')=='jsm-test-db-os-2760-v4'
+    detailed=type(child)is dict and child.get('version') in ('jsm-test-db-os-2760-v3','jsm-test-db-os-2760-v4','jsm-test-db-os-2760-v5')
+    discovery=type(child)is dict and child.get('version') in ('jsm-test-db-os-2760-v4','jsm-test-db-os-2760-v5')
+    binding=type(child)is dict and child.get('version')=='jsm-test-db-os-2760-v5'
     if detailed:fields|={'additional_services','namespace_settings'}
     if discovery:fields.add('docker_discovery')
-    if (type(child) is not dict or set(child)!=fields or child['version'] not in ('jsm-test-db-os-2760-v2','jsm-test-db-os-2760-v3','jsm-test-db-os-2760-v4')
+    if binding:fields.add('docker_binding')
+    if (type(child) is not dict or set(child)!=fields or child['version'] not in ('jsm-test-db-os-2760-v2','jsm-test-db-os-2760-v3','jsm-test-db-os-2760-v4','jsm-test-db-os-2760-v5')
             or child['nonce']!=nonce or type(child['euid']) is not int or child['euid']!=0
             or child['observation_state'] not in ('PARTIAL','OBSERVED')
             or child['effective_api_binding']!='NOT_ESTABLISHED' or child['test_disk_identity']!='NOT_ESTABLISHED'
             or child['db_proof']!='BLOCKED_TARGET_ADMISSION' or child['sql']!='NOT_ATTEMPTED'):
         return None
     if discovery and project_discovery(child['docker_discovery']) is None:return None
+    if binding and project_binding(child['docker_binding'],child['docker_discovery']) is None:return None
     if detailed:
         services=child['additional_services'];privacy=child['namespace_settings']
         if type(services)is not list or len(services)!=2 or type(privacy)is not list or len(privacy)!=2:return None
