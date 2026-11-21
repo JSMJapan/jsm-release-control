@@ -1,3 +1,64 @@
+# 21.11.2026 — уточнение fixed TEST OS metadata, child v3
+**SOURCE CANDIDATE / RUNTIME NOT_RUN / DB ADMISSION BLOCKED.** Продолжение
+[плана7060941419](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7060941419),
+[owner CODE READY7060980311](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7060980311).
+Среда только GCE TEST `dark-berm-508215-d2 / asia-northeast1-a / jsm-sandbox`,
+resource `150919059249400713`, develop.jsmjapan.com,34.104.157.63:22;
+[управление](https://github.com/JSMJapan/jsm-release-control/settings/environments)
+`test-api-readonly-access`. Это configured pins, не новый provider identity proof.
+
+Новый dispatch формирует child `jsm-test-db-os-2760-v3`. Прежний v2 decoder,
+его18stages/enum и default offline observer сохранены как compatibility branch.
+Outer scope receipt по-прежнему v2, status BLOCKED/exit1, SQL NOT_ATTEMPTED;
+OS facts не допускают БД. Никаких изменений в prod reader, общем CI, workflow,
+host/key/owner/main/attempt1/environment, sudo wrapper и runtime version.
+
+Добавлено ровно два fixed service metadata lookups — mariadb.service и
+docker.service, только Id/LoadState/ActiveState/MainPID. Новый код не читает
+proc/FD этих PID, не заменяет mysql role на MariaDB и не делает Docker API,
+container inspect или process/container scan. MainPID остаётся внутренним
+typed integer: выводятся только closed load/active states, pid_available и
+совпадение metadata начала/конца. Docker active не означает DB container.
+
+Только apache2.service/php7.4-fpm.service получают отдельный fixed show
+Id/PrivateTmp/PrivateMounts/PrivateNetwork. Буквальные yes/no становятся
+boolean, неизвестная/отсутствующая форма — null/UNKNOWN, без raw значений.
+PrivateTmp=true не отменяет существующее сравнение net/mnt namespace и не
+позволяет FD reading после mismatch. Три code-owned query shapes проверяются
+до subprocess; произвольных units/properties/paths из args/env/input нет.
+
+Child v3 добавляет два поля: additional_services (mariadb,docker) и
+namespace_settings (apache,php), плюс4фиксированных stage records (22 total).
+Чтение начала/конца не является atomic snapshot. stable=false/null и unknown
+properties не превращаются в OBSERVED; extra/raw PID/setting/ошибки отказывают
+на strict projection. Даже полный OS OBSERVED сохраняет все DB/API identity,
+grants, synthetic provenance и isolation NOT_ESTABLISHED.
+
+На прежних fixed socket/datadir/proc-Unix readers добавлены closed причины:
+NOT_FOUND, PERMISSION_REFUSED, UNSAFE_LINK_OR_KIND, SIZE_LIMIT,
+CHANGED_DURING_READ, PARSER_REFUSED. Существующие DEADLINE/OS_REFUSED и прочие
+guard reasons сохраняются. Никаких raw exceptions/paths/config/credentials.
+Malformed/duplicate matching Unix rows в v3 — parser refusal, а не доказанное
+отсутствие listener. Прежний v2 parser contract не расширяется этими причинами.
+
+Сохранены общий3с OS budget,0.7с/4096B на systemctl, root4с/outer5с,
+SSH≤15с/16384B, overall60с и root output≤12288B. Дополнительные fixed reads
+могут завершиться PARTIAL/DEADLINE, лимиты ради зелёного статуса не увеличены.
+Не добавлены SQL, PHP/Yii, HTTP/provider calls, конфигурация/DB credentials,
+datadir contents, seed/migrations или операции записи/установки/reload.
+
+RED: отсутствующие approved parsers/reason helpers и v3 observer dispatch.
+GREEN: actual observer с synthetic systemd/proc/filesystem fixtures, все22
+stage failure branches, strict legacy-v2/v3 projection и terminal BLOCKED;
+проверки родных FD/namespace/size/change guards не ослаблены. Точные команды,
+итог последнего SHA, CI и два независимых review — в PR. Merge/новый один run
+требуют отдельных точных допусков; CODE READY их не разрешает.
+
+Возврат source — revert будущего control PR. Runtime не запускался, серверные
+изменения не выполнялись. Root ведёт STATE и existing journal. Ниже сохранена
+история прежних v1/v2 кандидатов и их исходных условий; её старые NOT_RUN
+не являются новым runtime статусом уже выполненных запусков.
+
 # #2760: фиксированный OS metadata observer TEST, цель БД ещё не допущена
 
 Задача: [JSMJapan/jsm-storefront#2760](https://github.com/JSMJapan/jsm-storefront/issues/2760).

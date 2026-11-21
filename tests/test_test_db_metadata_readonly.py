@@ -202,6 +202,36 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(result['db_proof'],'BLOCKED_TARGET_ADMISSION')
         self.assertEqual(result['effective_api_binding'],'NOT_ESTABLISHED')
 
+    def test_valid_v3_service_facts_still_return_terminal_blocked_scope(self):
+        nonce='b'*32;outer=self.fixture(nonce);child=outer['root_diagnostic']
+        child.update(version='jsm-test-db-os-2760-v3',
+            additional_services=[dict(id=r,load_state='loaded',active_state='active',pid_available=True,stable=True)
+                for r in ('mariadb','docker')],
+            namespace_settings=[dict(id=r,private_tmp=True,private_mounts=False,private_network=False,stable=True)
+                for r in ('apache','php')],
+            stages=[dict(id=s,attempted=True,completed=True,error='NONE') for s in self.m.DETAIL_STAGE_IDS])
+        result=self.m.project_remote(json.dumps(outer).encode('ascii'),nonce)
+        self.assertEqual(result['os_observation']['observation_state'],'OBSERVED')
+        self.assertEqual(result['status'],'BLOCKED')
+        self.assertEqual(result['sql'],'NOT_ATTEMPTED')
+        for key in ('db_target_identity','db_data_provenance','db_isolation','effective_api_binding'):
+            self.assertEqual(result[key],'NOT_ESTABLISHED')
+
+    def test_actual_child_dispatch_requests_v3_details_without_executing_any_os_probe(self):
+        nonce='b'*32;captured=[]
+        def wrapper(value,child):
+            self.assertEqual(value,nonce);captured.append(child);return child.encode('ascii')
+        with patch.object(self.m,'wrap_root_program',side_effect=wrapper):self.m.remote_program(nonce)
+        before,footer=captured[0].rsplit('\nprint(',1)
+        namespace={};exec(compile(before,'<actual-observer-definitions>','exec'),namespace)
+        seen=[]
+        def observe(value,details=False):
+            seen.append((value,details));return dict(sql='NOT_ATTEMPTED')
+        namespace['_observe']=observe;out=io.StringIO()
+        with patch('sys.stdout',out):exec(compile('print('+footer,'<actual-dispatch>','exec'),namespace)
+        self.assertEqual(seen,[(nonce,True)])
+        self.assertEqual(json.loads(out.getvalue()),dict(sql='NOT_ATTEMPTED'))
+
     def test_v2_projection_rejects_forged_stage_fields_axes_units_or_completion(self):
         nonce='b'*32
         for change in ('old','missing','extra','order','attempt','completed','error','private',
