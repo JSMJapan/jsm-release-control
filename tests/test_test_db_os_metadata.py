@@ -1,5 +1,6 @@
 """Synthetic proc/systemd fixtures for #2760; no SSH, SQL or real /proc reads."""
 import copy
+import errno
 import importlib.util
 import json
 import os
@@ -42,6 +43,57 @@ class OsMetadataTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('test_db_os_metadata', SCRIPT)
         self.m = importlib.util.module_from_spec(spec); spec.loader.exec_module(self.m)
         self.ns = {}; exec(compile(self.m.LIBRARY, '<fixed-os-metadata>', 'exec'), self.ns)
+
+    def test_fixed_additional_units_are_metadata_only_and_cannot_replace_mysql_role(self):
+        self.assertTrue('_parse_additional_units' in self.ns, 'missing approved fixed unit metadata')
+        text = ('Id=mariadb.service\nLoadState=loaded\nActiveState=active\nMainPID=404\n\n'
+                'Id=docker.service\nLoadState=not-found\nActiveState=inactive\nMainPID=0\n')
+        self.assertEqual(self.ns['_parse_additional_units'](text), {
+            'mariadb': dict(load='loaded', active='active', pid=404),
+            'docker': dict(load='not-found', active='inactive', pid=0)})
+        for bad in (text.replace('404', '404;PRIVATE'), text.replace('mariadb.service', 'mysql.service'),
+                    text + '\nId=PRIVATE.service\n', text.replace('MainPID=404', 'MainPID=404\nMainPID=404')):
+            with self.assertRaises(ValueError): self.ns['_parse_additional_units'](bad)
+        self.assertEqual(self.ns['ROLES'], ('apache', 'php', 'mysql'))
+
+    def test_namespace_properties_are_closed_apache_php_only_and_unknown_is_not_admission(self):
+        self.assertTrue('_parse_privacy' in self.ns, 'missing approved private-namespace properties')
+        text = ('Id=apache2.service\nPrivateTmp=yes\nPrivateMounts=no\nPrivateNetwork=yes\n\n'
+                'Id=php7.4-fpm.service\nPrivateTmp=disconnected\nPrivateMounts=yes\nPrivateNetwork=no\n')
+        value = self.ns['_parse_privacy'](text)
+        self.assertEqual(value['apache'], dict(private_tmp=True, private_mounts=False, private_network=True))
+        self.assertEqual(value['php'], dict(private_tmp=None, private_mounts=True, private_network=False))
+        self.assertNotIn('disconnected', json.dumps(value))
+        for bad in (text.replace('apache2.service', 'mariadb.service'), text + '\nEnvironment=PRIVATE\n',
+                    text.replace('PrivateTmp=yes', 'PrivateTmp=yes\nPrivateTmp=no')):
+            with self.assertRaises(ValueError): self.ns['_parse_privacy'](bad)
+
+    def test_existing_path_failures_have_closed_errno_without_private_message(self):
+        self.assertTrue('_error_code' in self.ns, 'missing closed errno projection')
+        for error, expected in ((FileNotFoundError('PRIVATE'), 'NOT_FOUND'),
+                                (PermissionError('PRIVATE'), 'PERMISSION_REFUSED'),
+                                (OSError(errno.ELOOP, 'PRIVATE'), 'UNSAFE_LINK_OR_KIND'),
+                                (OSError(errno.ENOTDIR, 'PRIVATE'), 'UNSAFE_LINK_OR_KIND'),
+                                (OSError(errno.EIO, 'PRIVATE'), 'OS_REFUSED'),
+                                (UnicodeError('PRIVATE'), 'PARSER_REFUSED')):
+            with self.subTest(expected=expected):
+                self.assertEqual(self.ns['_error_code'](error), expected)
+        with tempfile.TemporaryDirectory(prefix='jsm-2760-reasons-', dir=FIXTURE_TMP) as folder:
+            root = Path(folder); leaf = root/'missing'
+            missing = self.ns['_object_metadata'](str(leaf), time.monotonic()+1, 'directory')
+            self.assertEqual(missing['error'], 'NOT_FOUND')
+            target = root/'target'; target.mkdir(); leaf.symlink_to(target)
+            unsafe = self.ns['_object_metadata'](str(leaf), time.monotonic()+1, 'directory')
+            self.assertEqual(unsafe['error'], 'UNSAFE_LINK_OR_KIND')
+            self.assertNotIn(folder, json.dumps([missing, unsafe]))
+
+    def test_systemctl_extension_rejects_unapproved_properties_and_units_before_execution(self):
+        self.assertTrue('_systemctl_snapshot' in self.ns, 'missing fixed query reuse')
+        for props, units in ((('Id','Environment'), ('apache2.service',)),
+                             (('Id','LoadState','ActiveState','MainPID'), ('PRIVATE.service',)),
+                             (('Id','PrivateTmp','PrivateMounts','PrivateNetwork'), ('mariadb.service','docker.service'))):
+            with patch.dict(self.ns, {'_parents': lambda *a: self.fail('unapproved command reached path access')}):
+                with self.assertRaises(ValueError): self.ns['_systemctl_snapshot'](props, units, time.monotonic()+1)
 
     def test_service_snapshot_only_accepts_three_fixed_units_and_typed_pids(self):
         result = self.ns['_parse_units'](UNITS)

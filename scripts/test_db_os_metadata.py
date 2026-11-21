@@ -12,20 +12,42 @@ STAGE_IDS = ('units_begin','apache_process_begin','php_process_begin','mysql_pro
 STAGE_ERRORS = ('NONE','NOT_ATTEMPTED','DEPENDENCY_UNAVAILABLE','UNIT_UNAVAILABLE','PID_UNAVAILABLE',
     'NAMESPACE_MISMATCH','EXE_MISMATCH','UNAVAILABLE_OR_REFUSED','DEADLINE','OS_REFUSED',
     'PARSE_OR_GUARD_REFUSED','SUBPROCESS_REFUSED','INCONSISTENT','STABILITY_NOT_CONFIRMED','UNSUPPORTED_LAYOUT')
+DETAIL_STAGE_IDS = STAGE_IDS + ('additional_units_begin','privacy_begin','additional_units_end','privacy_end')
+DETAIL_ERRORS = ('NOT_FOUND','PERMISSION_REFUSED','UNSAFE_LINK_OR_KIND','SIZE_LIMIT',
+    'CHANGED_DURING_READ','PARSER_REFUSED','UNKNOWN_PROPERTY_VALUE')
+DETAIL_STAGE_ERRORS = STAGE_ERRORS + DETAIL_ERRORS
 
-LIBRARY = 'STAGE_IDS='+repr(STAGE_IDS)+'\n'+r'''
-import hashlib,json,os,re,selectors,signal,stat,subprocess,time
+LIBRARY = ('STAGE_IDS='+repr(STAGE_IDS)+'\nDETAIL_STAGE_IDS='+repr(DETAIL_STAGE_IDS)+
+    '\nDETAIL_ERRORS='+repr(DETAIL_ERRORS)+'\n')+r'''
+import errno,hashlib,json,os,re,selectors,signal,stat,subprocess,time
 ROLES=('apache','php','mysql')
 UNITS={'apache':'apache2.service','php':'php7.4-fpm.service','mysql':'mysql.service'}
+ADDITIONAL_UNITS={'mariadb':'mariadb.service','docker':'docker.service'}
+UNIT_PROPERTIES=('Id','LoadState','ActiveState','MainPID')
+PRIVACY_PROPERTIES=('Id','PrivateTmp','PrivateMounts','PrivateNetwork')
 EXES={'apache':'/usr/sbin/apache2','php':'/usr/sbin/php-fpm7.4','mysql':'/usr/sbin/mysqld'}
 SOCKETS={'php':'/run/php/php7.4-fpm.sock','mysql':'/run/mysqld/mysqld.sock'}
 os_geteuid=os.geteuid
+class MetadataRefused(ValueError):
+    def __init__(self,code):
+        self.code=code if code in DETAIL_ERRORS+('DEADLINE','PARSE_OR_GUARD_REFUSED','SUBPROCESS_REFUSED') else 'PARSE_OR_GUARD_REFUSED'
+        super().__init__(self.code)
+def _error_code(error):
+    if isinstance(error,MetadataRefused):return error.code
+    if isinstance(error,FileNotFoundError):return 'NOT_FOUND'
+    if isinstance(error,PermissionError):return 'PERMISSION_REFUSED'
+    if isinstance(error,OSError):
+        if error.errno in (errno.ELOOP,errno.ENOTDIR):return 'UNSAFE_LINK_OR_KIND'
+        return 'OS_REFUSED'
+    if isinstance(error,UnicodeError):return 'PARSER_REFUSED'
+    if isinstance(error,subprocess.SubprocessError):return 'SUBPROCESS_REFUSED'
+    return 'PARSE_OR_GUARD_REFUSED'
 def _check(deadline):
-    if time.monotonic()>=deadline: raise ValueError()
+    if time.monotonic()>=deadline: raise MetadataRefused('DEADLINE')
 def _parents(path,deadline):
     fds=[]
     try:
-        if not path.startswith('/') or any(p in ('','.','..') for p in path[1:].split('/')): raise ValueError()
+        if not path.startswith('/') or any(p in ('','.','..') for p in path[1:].split('/')): raise MetadataRefused('UNSAFE_LINK_OR_KIND')
         _check(deadline);fds.append(os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW))
         for part in path[1:].split('/')[:-1]:
             _check(deadline);fds.append(os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fds[-1]))
@@ -41,15 +63,15 @@ def _proc_read(path,deadline,limit=65536):
         fds,name=_parents(path,deadline)
         fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=fds[-1])
         before=os.fstat(fd)
-        if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1:raise ValueError()
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1:raise MetadataRefused('UNSAFE_LINK_OR_KIND')
         data=bytearray()
         while True:
             _check(deadline);chunk=os.read(fd,min(4096,limit+1-len(data)))
             if not chunk:break
             data.extend(chunk)
-            if len(data)>limit:raise ValueError()
+            if len(data)>limit:raise MetadataRefused('SIZE_LIMIT')
         # procfs reports size zero; exact length is intentionally not compared.
-        if _stamp(before)!=_stamp(os.fstat(fd)) or _stamp(before)!=_stamp(os.stat(name,dir_fd=fds[-1],follow_symlinks=False)):raise ValueError()
+        if _stamp(before)!=_stamp(os.fstat(fd)) or _stamp(before)!=_stamp(os.stat(name,dir_fd=fds[-1],follow_symlinks=False)):raise MetadataRefused('CHANGED_DURING_READ')
         return data.decode('utf-8')
     finally:
         if fd is not None:os.close(fd)
@@ -65,7 +87,7 @@ def _readlink(path,deadline):
         return value
     finally:
         for directory in reversed(fds):os.close(directory)
-def _parse_units(text):
+def _parse_units_for(text,units):
     if type(text)is not str or len(text)>4096:raise ValueError()
     result={}
     for block in text.strip().split('\n\n'):
@@ -75,21 +97,43 @@ def _parse_units(text):
             if not sep or key not in ('Id','LoadState','ActiveState','MainPID') or key in values:raise ValueError()
             values[key]=value
         if set(values)!={'Id','LoadState','ActiveState','MainPID'}:raise ValueError()
-        roles=[r for r in ROLES if UNITS[r]==values['Id']]
+        roles=[r for r in units if units[r]==values['Id']]
         if len(roles)!=1 or roles[0] in result:raise ValueError()
         if values['LoadState'] not in ('loaded','not-found','masked','error') or values['ActiveState'] not in ('active','inactive','failed','activating','deactivating'):raise ValueError()
         if not re.fullmatch('0|[1-9][0-9]{0,9}',values['MainPID']):raise ValueError()
         pid=int(values['MainPID'])
         if pid>2147483647:raise ValueError()
         result[roles[0]]=dict(load=values['LoadState'],active=values['ActiveState'],pid=pid)
-    if set(result)!=set(ROLES):raise ValueError()
+    if set(result)!=set(units):raise ValueError()
     return result
-def _unit_snapshot(deadline):
+def _parse_units(text):return _parse_units_for(text,UNITS)
+def _parse_additional_units(text):return _parse_units_for(text,ADDITIONAL_UNITS)
+def _parse_privacy(text):
+    if type(text)is not str or len(text)>4096:raise MetadataRefused('SIZE_LIMIT')
+    result={};units={r:UNITS[r] for r in ('apache','php')}
+    for block in text.strip().split('\n\n'):
+        values={}
+        for line in block.splitlines():
+            key,sep,value=line.partition('=')
+            if not sep or key not in PRIVACY_PROPERTIES or key in values:raise MetadataRefused('PARSER_REFUSED')
+            values[key]=value
+        roles=[r for r in units if units[r]==values.get('Id')]
+        if len(roles)!=1 or roles[0] in result:raise MetadataRefused('PARSER_REFUSED')
+        result[roles[0]]={out:True if values.get(prop)=='yes' else False if values.get(prop)=='no' else None
+            for prop,out in (('PrivateTmp','private_tmp'),('PrivateMounts','private_mounts'),('PrivateNetwork','private_network'))}
+    if set(result)!=set(units):raise MetadataRefused('PARSER_REFUSED')
+    return result
+def _systemctl_snapshot(properties,units,deadline):
+    # These are the only three code-owned commands. There is no runtime choice,
+    # caller unit, environment/property scan, Docker API or process discovery.
+    allowed=((UNIT_PROPERTIES,tuple(UNITS.values())),(UNIT_PROPERTIES,tuple(ADDITIONAL_UNITS.values())),
+        (PRIVACY_PROPERTIES,(UNITS['apache'],UNITS['php'])))
+    if (properties,units) not in allowed:raise MetadataRefused('PARSE_OR_GUARD_REFUSED')
     path='/usr/bin/systemctl';fds=[];process=None
     try:
         fds,name=_parents(path,deadline);s=os.stat(name,dir_fd=fds[-1],follow_symlinks=False)
         if not stat.S_ISREG(s.st_mode) or s.st_uid!=0 or s.st_mode&0o022:raise ValueError()
-        command=[path,'show','--no-pager','--property=Id,LoadState,ActiveState,MainPID',UNITS['apache'],UNITS['php'],UNITS['mysql']]
+        command=[path,'show','--no-pager','--property='+','.join(properties),*units]
         process=subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
             start_new_session=True,env={'PATH':'/usr/bin:/bin','LANG':'C'})
         data=bytearray();eof=False;until=min(deadline,time.monotonic()+.7)
@@ -103,7 +147,7 @@ def _unit_snapshot(deadline):
                 if eof:break
         remaining=until-time.monotonic()
         if not eof or remaining<=0 or process.wait(timeout=remaining)!=0:raise ValueError()
-        return _parse_units(data.decode('ascii'))
+        return data.decode('ascii')
     finally:
         if process is not None:
             try:os.killpg(process.pid,signal.SIGKILL)
@@ -113,6 +157,12 @@ def _unit_snapshot(deadline):
                 except subprocess.TimeoutExpired:pass
             process.stdout.close()
         for directory in reversed(fds):os.close(directory)
+def _unit_snapshot(deadline):
+    return _parse_units(_systemctl_snapshot(UNIT_PROPERTIES,tuple(UNITS.values()),deadline))
+def _additional_unit_snapshot(deadline):
+    return _parse_additional_units(_systemctl_snapshot(UNIT_PROPERTIES,tuple(ADDITIONAL_UNITS.values()),deadline))
+def _privacy_snapshot(deadline):
+    return _parse_privacy(_systemctl_snapshot(PRIVACY_PROPERTIES,(UNITS['apache'],UNITS['php']),deadline))
 def _proc_start(text,pid):
     if type(text)is not str or not text.startswith(str(pid)+' (') or len(text)>4096:raise ValueError()
     close=text.rfind(') ')
@@ -173,13 +223,14 @@ def _proc_still_same(role,pid,start,deadline):
         return True
     except (OSError,ValueError,UnicodeError):return False
 def _parse_unix(text):
-    if type(text)is not str or len(text.encode('utf-8'))>65536:raise ValueError()
+    if type(text)is not str:raise MetadataRefused('PARSER_REFUSED')
+    if len(text.encode('utf-8'))>65536:raise MetadataRefused('SIZE_LIMIT')
     result={};matches={r:[] for r in SOCKETS}
     lines=text.splitlines()
-    if not lines or not lines[0].split() or lines[0].split()[-1]!='Path':raise ValueError()
+    if not lines or not lines[0].split() or lines[0].split()[-1]!='Path':raise MetadataRefused('PARSER_REFUSED')
     for line in lines[1:]:
         fields=line.split(None,7)
-        if len(fields)<7:raise ValueError()
+        if len(fields)<7:raise MetadataRefused('PARSER_REFUSED')
         if len(fields)<8:continue
         for role,path in SOCKETS.items():
             if fields[7]!=path:continue
@@ -196,17 +247,17 @@ def _object_metadata(path,deadline,kind):
     try:
         fds,name=_parents(path,deadline);before=os.stat(name,dir_fd=fds[-1],follow_symlinks=False)
         correct=stat.S_ISSOCK(before.st_mode) if kind=='socket' else stat.S_ISDIR(before.st_mode)
-        if not correct or stat.S_ISLNK(before.st_mode):raise ValueError()
+        if not correct or stat.S_ISLNK(before.st_mode):raise MetadataRefused('UNSAFE_LINK_OR_KIND')
         if kind=='directory':
             fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fds[-1])
-            if _stamp(before)!=_stamp(os.fstat(fd)):raise ValueError()
-        if _stamp(before)!=_stamp(os.stat(name,dir_fd=fds[-1],follow_symlinks=False)):raise ValueError()
+            if _stamp(before)!=_stamp(os.fstat(fd)):raise MetadataRefused('CHANGED_DURING_READ')
+        if _stamp(before)!=_stamp(os.stat(name,dir_fd=fds[-1],follow_symlinks=False)):raise MetadataRefused('CHANGED_DURING_READ')
         result=dict(state='observed',identity=_stamp(before))
         if kind=='socket':result['is_socket']=True
         else:result.update(is_directory=True,device=(os.major(before.st_dev),os.minor(before.st_dev)))
         return result
-    except (OSError,ValueError):
-        return dict(state='unknown',**({'is_socket':None} if kind=='socket' else {'is_directory':None,'device':None}))
+    except (OSError,ValueError) as error:
+        return dict(state='unknown',error=_error_code(error),**({'is_socket':None} if kind=='socket' else {'is_directory':None,'device':None}))
     finally:
         if fd is not None:os.close(fd)
         for directory in reversed(fds):os.close(directory)
