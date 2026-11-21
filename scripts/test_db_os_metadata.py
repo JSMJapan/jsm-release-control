@@ -294,11 +294,12 @@ def _mount_snapshot(device,deadline):
     result=_parse_mount(text,device)
     result['_identity']=hashlib.sha256(text.encode('utf-8')).hexdigest()
     return result
-def _observe(nonce,details=False):
+def _observe(nonce,details=False,discovery=False):
     if type(nonce)is not str or not re.fullmatch('[0-9a-f]{32}',nonce):raise ValueError()
     if type(details)is not bool:raise ValueError()
+    if type(discovery)is not bool or discovery and not details:raise ValueError()
     deadline=time.monotonic()+3
-    result=dict(version='jsm-test-db-os-2760-v3' if details else 'jsm-test-db-os-2760-v2',nonce=nonce,euid=os_geteuid(),observation_state='PARTIAL',
+    result=dict(version='jsm-test-db-os-2760-v4' if discovery else 'jsm-test-db-os-2760-v3' if details else 'jsm-test-db-os-2760-v2',nonce=nonce,euid=os_geteuid(),observation_state='PARTIAL',
         processes=[dict(id=r,state='unknown',exe_matches=None,namespace_matches=None,stable=None,
             net_namespace_matches=None,mount_namespace_matches=None,
             load_state=None,active_state=None,pid_available=None) for r in ROLES],
@@ -309,6 +310,7 @@ def _observe(nonce,details=False):
     if details:
         result['additional_services']=[dict(id=r,load_state=None,active_state=None,pid_available=None,stable=None) for r in ADDITIONAL_UNITS]
         result['namespace_settings']=[dict(id=r,private_tmp=None,private_mounts=None,private_network=None,stable=None) for r in ('apache','php')]
+    if discovery:result['docker_discovery']=_docker_packet()
     if result['euid']!=0:return result
     stages={r['id']:r for r in result['stages']}
     def skip(name,error):stages[name]['error']=error
@@ -343,6 +345,7 @@ def _observe(nonce,details=False):
         privacy=run('privacy_begin',lambda:_privacy_snapshot(deadline))
         if privacy is not None and any(v is None for row in privacy.values() for v in row.values()):
             unconfirmed('privacy_begin','UNKNOWN_PROPERTY_VALUE')
+    if discovery:docker_pending=_docker_begin(additional.get('docker') if additional is not None else None,deadline)
     for role,row in zip(ROLES,result['processes']):
         name=role+'_process_begin'
         if first is None:skip(name,'DEPENDENCY_UNAVAILABLE');continue
@@ -393,6 +396,7 @@ def _observe(nonce,details=False):
                     and all(type(v)is bool for v in privacy_end[role].values())):
                 row['stable']=privacy[role]==privacy_end[role]
                 if not row['stable']:unconfirmed('privacy_end','INCONSISTENT')
+    if discovery:result['docker_discovery']=_docker_finish(docker_pending,additional_end.get('docker') if additional_end is not None else None,deadline)
     last_unix=run('unix_end',lambda:_unix_snapshot_detailed(deadline) if details else _unix_snapshot(deadline))
     for role,row in zip(ROLES,result['processes']):
         name=role+'_process_end';proc=observed.get(role)
@@ -442,5 +446,6 @@ def _observe(nonce,details=False):
     if details and (not all(row['stable']is True for row in result['additional_services']+result['namespace_settings'])
             or not all(stage['completed'] for stage in result['stages'])):
         result['observation_state']='PARTIAL'
+    if discovery and result['docker_discovery']['state']!='OBSERVED':result['observation_state']='PARTIAL'
     return result
 '''
