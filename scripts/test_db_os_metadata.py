@@ -12,20 +12,43 @@ STAGE_IDS = ('units_begin','apache_process_begin','php_process_begin','mysql_pro
 STAGE_ERRORS = ('NONE','NOT_ATTEMPTED','DEPENDENCY_UNAVAILABLE','UNIT_UNAVAILABLE','PID_UNAVAILABLE',
     'NAMESPACE_MISMATCH','EXE_MISMATCH','UNAVAILABLE_OR_REFUSED','DEADLINE','OS_REFUSED',
     'PARSE_OR_GUARD_REFUSED','SUBPROCESS_REFUSED','INCONSISTENT','STABILITY_NOT_CONFIRMED','UNSUPPORTED_LAYOUT')
+DETAIL_STAGE_IDS = STAGE_IDS + ('additional_units_begin','privacy_begin','additional_units_end','privacy_end')
+DETAIL_ERRORS = ('NOT_FOUND','PERMISSION_REFUSED','UNSAFE_LINK_OR_KIND','SIZE_LIMIT',
+    'CHANGED_DURING_READ','PARSER_REFUSED','UNKNOWN_PROPERTY_VALUE')
+DETAIL_STAGE_ERRORS = STAGE_ERRORS + DETAIL_ERRORS
 
-LIBRARY = 'STAGE_IDS='+repr(STAGE_IDS)+'\n'+r'''
-import hashlib,json,os,re,selectors,signal,stat,subprocess,time
+LIBRARY = ('STAGE_IDS='+repr(STAGE_IDS)+'\nDETAIL_STAGE_IDS='+repr(DETAIL_STAGE_IDS)+
+    '\nDETAIL_ERRORS='+repr(DETAIL_ERRORS)+'\n')+r'''
+import errno,hashlib,json,os,re,selectors,signal,stat,subprocess,time
 ROLES=('apache','php','mysql')
 UNITS={'apache':'apache2.service','php':'php7.4-fpm.service','mysql':'mysql.service'}
+ADDITIONAL_UNITS={'mariadb':'mariadb.service','docker':'docker.service'}
+UNIT_PROPERTIES=('Id','LoadState','ActiveState','MainPID')
+PRIVACY_PROPERTIES=('Id','PrivateTmp','PrivateMounts','PrivateNetwork')
 EXES={'apache':'/usr/sbin/apache2','php':'/usr/sbin/php-fpm7.4','mysql':'/usr/sbin/mysqld'}
 SOCKETS={'php':'/run/php/php7.4-fpm.sock','mysql':'/run/mysqld/mysqld.sock'}
 os_geteuid=os.geteuid
+class MetadataRefused(ValueError):
+    def __init__(self,code):
+        self.code=code if code in DETAIL_ERRORS+('DEADLINE','PARSE_OR_GUARD_REFUSED','SUBPROCESS_REFUSED') else 'PARSE_OR_GUARD_REFUSED'
+        super().__init__(self.code)
+def _error_code(error):
+    if isinstance(error,MetadataRefused):return error.code
+    if isinstance(error,FileNotFoundError):return 'NOT_FOUND'
+    if isinstance(error,PermissionError):return 'PERMISSION_REFUSED'
+    if isinstance(error,OSError):
+        if error.errno in (errno.ELOOP,errno.ENOTDIR):return 'UNSAFE_LINK_OR_KIND'
+        return 'OS_REFUSED'
+    if isinstance(error,UnicodeError):return 'PARSER_REFUSED'
+    if isinstance(error,subprocess.TimeoutExpired):return 'DEADLINE'
+    if isinstance(error,subprocess.SubprocessError):return 'SUBPROCESS_REFUSED'
+    return 'PARSE_OR_GUARD_REFUSED'
 def _check(deadline):
-    if time.monotonic()>=deadline: raise ValueError()
+    if time.monotonic()>=deadline: raise MetadataRefused('DEADLINE')
 def _parents(path,deadline):
     fds=[]
     try:
-        if not path.startswith('/') or any(p in ('','.','..') for p in path[1:].split('/')): raise ValueError()
+        if not path.startswith('/') or any(p in ('','.','..') for p in path[1:].split('/')): raise MetadataRefused('UNSAFE_LINK_OR_KIND')
         _check(deadline);fds.append(os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW))
         for part in path[1:].split('/')[:-1]:
             _check(deadline);fds.append(os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fds[-1]))
@@ -41,15 +64,15 @@ def _proc_read(path,deadline,limit=65536):
         fds,name=_parents(path,deadline)
         fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=fds[-1])
         before=os.fstat(fd)
-        if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1:raise ValueError()
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1:raise MetadataRefused('UNSAFE_LINK_OR_KIND')
         data=bytearray()
         while True:
             _check(deadline);chunk=os.read(fd,min(4096,limit+1-len(data)))
             if not chunk:break
             data.extend(chunk)
-            if len(data)>limit:raise ValueError()
+            if len(data)>limit:raise MetadataRefused('SIZE_LIMIT')
         # procfs reports size zero; exact length is intentionally not compared.
-        if _stamp(before)!=_stamp(os.fstat(fd)) or _stamp(before)!=_stamp(os.stat(name,dir_fd=fds[-1],follow_symlinks=False)):raise ValueError()
+        if _stamp(before)!=_stamp(os.fstat(fd)) or _stamp(before)!=_stamp(os.stat(name,dir_fd=fds[-1],follow_symlinks=False)):raise MetadataRefused('CHANGED_DURING_READ')
         return data.decode('utf-8')
     finally:
         if fd is not None:os.close(fd)
@@ -65,31 +88,54 @@ def _readlink(path,deadline):
         return value
     finally:
         for directory in reversed(fds):os.close(directory)
-def _parse_units(text):
-    if type(text)is not str or len(text)>4096:raise ValueError()
+def _parse_units_for(text,units):
+    if type(text)is not str:raise MetadataRefused('PARSER_REFUSED')
+    if len(text)>4096:raise MetadataRefused('SIZE_LIMIT')
     result={}
     for block in text.strip().split('\n\n'):
         values={}
         for line in block.splitlines():
             key,sep,value=line.partition('=')
-            if not sep or key not in ('Id','LoadState','ActiveState','MainPID') or key in values:raise ValueError()
+            if not sep or key not in ('Id','LoadState','ActiveState','MainPID') or key in values:raise MetadataRefused('PARSER_REFUSED')
             values[key]=value
-        if set(values)!={'Id','LoadState','ActiveState','MainPID'}:raise ValueError()
-        roles=[r for r in ROLES if UNITS[r]==values['Id']]
-        if len(roles)!=1 or roles[0] in result:raise ValueError()
-        if values['LoadState'] not in ('loaded','not-found','masked','error') or values['ActiveState'] not in ('active','inactive','failed','activating','deactivating'):raise ValueError()
-        if not re.fullmatch('0|[1-9][0-9]{0,9}',values['MainPID']):raise ValueError()
+        if set(values)!={'Id','LoadState','ActiveState','MainPID'}:raise MetadataRefused('PARSER_REFUSED')
+        roles=[r for r in units if units[r]==values['Id']]
+        if len(roles)!=1 or roles[0] in result:raise MetadataRefused('PARSER_REFUSED')
+        if values['LoadState'] not in ('loaded','not-found','masked','error') or values['ActiveState'] not in ('active','inactive','failed','activating','deactivating'):raise MetadataRefused('PARSER_REFUSED')
+        if not re.fullmatch('0|[1-9][0-9]{0,9}',values['MainPID']):raise MetadataRefused('PARSER_REFUSED')
         pid=int(values['MainPID'])
-        if pid>2147483647:raise ValueError()
+        if pid>2147483647:raise MetadataRefused('PARSER_REFUSED')
         result[roles[0]]=dict(load=values['LoadState'],active=values['ActiveState'],pid=pid)
-    if set(result)!=set(ROLES):raise ValueError()
+    if set(result)!=set(units):raise MetadataRefused('PARSER_REFUSED')
     return result
-def _unit_snapshot(deadline):
+def _parse_units(text):return _parse_units_for(text,UNITS)
+def _parse_additional_units(text):return _parse_units_for(text,ADDITIONAL_UNITS)
+def _parse_privacy(text):
+    if type(text)is not str or len(text)>4096:raise MetadataRefused('SIZE_LIMIT')
+    result={};units={r:UNITS[r] for r in ('apache','php')}
+    for block in text.strip().split('\n\n'):
+        values={}
+        for line in block.splitlines():
+            key,sep,value=line.partition('=')
+            if not sep or key not in PRIVACY_PROPERTIES or key in values:raise MetadataRefused('PARSER_REFUSED')
+            values[key]=value
+        roles=[r for r in units if units[r]==values.get('Id')]
+        if len(roles)!=1 or roles[0] in result:raise MetadataRefused('PARSER_REFUSED')
+        result[roles[0]]={out:True if values.get(prop)=='yes' else False if values.get(prop)=='no' else None
+            for prop,out in (('PrivateTmp','private_tmp'),('PrivateMounts','private_mounts'),('PrivateNetwork','private_network'))}
+    if set(result)!=set(units):raise MetadataRefused('PARSER_REFUSED')
+    return result
+def _systemctl_snapshot(properties,units,deadline):
+    # These are the only three code-owned commands. There is no runtime choice,
+    # caller unit, environment/property scan, Docker API or process discovery.
+    allowed=((UNIT_PROPERTIES,tuple(UNITS.values())),(UNIT_PROPERTIES,tuple(ADDITIONAL_UNITS.values())),
+        (PRIVACY_PROPERTIES,(UNITS['apache'],UNITS['php'])))
+    if (properties,units) not in allowed:raise MetadataRefused('PARSE_OR_GUARD_REFUSED')
     path='/usr/bin/systemctl';fds=[];process=None
     try:
         fds,name=_parents(path,deadline);s=os.stat(name,dir_fd=fds[-1],follow_symlinks=False)
-        if not stat.S_ISREG(s.st_mode) or s.st_uid!=0 or s.st_mode&0o022:raise ValueError()
-        command=[path,'show','--no-pager','--property=Id,LoadState,ActiveState,MainPID',UNITS['apache'],UNITS['php'],UNITS['mysql']]
+        if not stat.S_ISREG(s.st_mode) or s.st_uid!=0 or s.st_mode&0o022:raise MetadataRefused('UNSAFE_LINK_OR_KIND')
+        command=[path,'show','--no-pager','--property='+','.join(properties),*units]
         process=subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
             start_new_session=True,env={'PATH':'/usr/bin:/bin','LANG':'C'})
         data=bytearray();eof=False;until=min(deadline,time.monotonic()+.7)
@@ -98,12 +144,13 @@ def _unit_snapshot(deadline):
             while time.monotonic()<until:
                 for key,_ in ready.select(min(.05,max(0,until-time.monotonic()))):
                     chunk=os.read(key.fileobj.fileno(),min(4096,4097-len(data)));data.extend(chunk)
-                    if len(data)>4096:raise ValueError()
+                    if len(data)>4096:raise MetadataRefused('SIZE_LIMIT')
                     if not chunk:eof=True;break
                 if eof:break
         remaining=until-time.monotonic()
-        if not eof or remaining<=0 or process.wait(timeout=remaining)!=0:raise ValueError()
-        return _parse_units(data.decode('ascii'))
+        if not eof or remaining<=0:raise MetadataRefused('DEADLINE')
+        if process.wait(timeout=remaining)!=0:raise MetadataRefused('SUBPROCESS_REFUSED')
+        return data.decode('ascii')
     finally:
         if process is not None:
             try:os.killpg(process.pid,signal.SIGKILL)
@@ -113,6 +160,12 @@ def _unit_snapshot(deadline):
                 except subprocess.TimeoutExpired:pass
             process.stdout.close()
         for directory in reversed(fds):os.close(directory)
+def _unit_snapshot(deadline):
+    return _parse_units(_systemctl_snapshot(UNIT_PROPERTIES,tuple(UNITS.values()),deadline))
+def _additional_unit_snapshot(deadline):
+    return _parse_additional_units(_systemctl_snapshot(UNIT_PROPERTIES,tuple(ADDITIONAL_UNITS.values()),deadline))
+def _privacy_snapshot(deadline):
+    return _parse_privacy(_systemctl_snapshot(PRIVACY_PROPERTIES,(UNITS['apache'],UNITS['php']),deadline))
 def _proc_start(text,pid):
     if type(text)is not str or not text.startswith(str(pid)+' (') or len(text)>4096:raise ValueError()
     close=text.rfind(') ')
@@ -172,14 +225,15 @@ def _proc_still_same(role,pid,start,deadline):
             if not re.fullmatch(namespace+r':\[[0-9]{1,20}\]',observed) or observed!=observer:return False
         return True
     except (OSError,ValueError,UnicodeError):return False
-def _parse_unix(text):
-    if type(text)is not str or len(text.encode('utf-8'))>65536:raise ValueError()
+def _parse_unix(text,details=False):
+    if type(text)is not str:raise MetadataRefused('PARSER_REFUSED')
+    if len(text.encode('utf-8'))>65536:raise MetadataRefused('SIZE_LIMIT')
     result={};matches={r:[] for r in SOCKETS}
     lines=text.splitlines()
-    if not lines or not lines[0].split() or lines[0].split()[-1]!='Path':raise ValueError()
+    if not lines or not lines[0].split() or lines[0].split()[-1]!='Path':raise MetadataRefused('PARSER_REFUSED')
     for line in lines[1:]:
         fields=line.split(None,7)
-        if len(fields)<7:raise ValueError()
+        if len(fields)<7:raise MetadataRefused('PARSER_REFUSED')
         if len(fields)<8:continue
         for role,path in SOCKETS.items():
             if fields[7]!=path:continue
@@ -187,26 +241,29 @@ def _parse_unix(text):
                 and fields[4]=='0001' and fields[5]=='01' and re.fullmatch('[0-9]{1,20}',fields[6])is not None)
             matches[role].append(int(fields[6]) if valid else None)
     for role,items in matches.items():
+        if details and items and (len(items)!=1 or items[0] is None):raise MetadataRefused('PARSER_REFUSED')
         result[role]=items[0] if len(items)==1 and items[0] is not None else None
     return result
 def _unix_snapshot(deadline):
     return _parse_unix(_proc_read('/proc/'+str(os.getpid())+'/net/unix',deadline))
+def _unix_snapshot_detailed(deadline):
+    return _parse_unix(_proc_read('/proc/'+str(os.getpid())+'/net/unix',deadline),details=True)
 def _object_metadata(path,deadline,kind):
     fds=[];fd=None
     try:
         fds,name=_parents(path,deadline);before=os.stat(name,dir_fd=fds[-1],follow_symlinks=False)
         correct=stat.S_ISSOCK(before.st_mode) if kind=='socket' else stat.S_ISDIR(before.st_mode)
-        if not correct or stat.S_ISLNK(before.st_mode):raise ValueError()
+        if not correct or stat.S_ISLNK(before.st_mode):raise MetadataRefused('UNSAFE_LINK_OR_KIND')
         if kind=='directory':
             fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fds[-1])
-            if _stamp(before)!=_stamp(os.fstat(fd)):raise ValueError()
-        if _stamp(before)!=_stamp(os.stat(name,dir_fd=fds[-1],follow_symlinks=False)):raise ValueError()
+            if _stamp(before)!=_stamp(os.fstat(fd)):raise MetadataRefused('CHANGED_DURING_READ')
+        if _stamp(before)!=_stamp(os.stat(name,dir_fd=fds[-1],follow_symlinks=False)):raise MetadataRefused('CHANGED_DURING_READ')
         result=dict(state='observed',identity=_stamp(before))
         if kind=='socket':result['is_socket']=True
         else:result.update(is_directory=True,device=(os.major(before.st_dev),os.minor(before.st_dev)))
         return result
-    except (OSError,ValueError):
-        return dict(state='unknown',**({'is_socket':None} if kind=='socket' else {'is_directory':None,'device':None}))
+    except (OSError,ValueError) as error:
+        return dict(state='unknown',error=_error_code(error),**({'is_socket':None} if kind=='socket' else {'is_directory':None,'device':None}))
     finally:
         if fd is not None:os.close(fd)
         for directory in reversed(fds):os.close(directory)
@@ -237,17 +294,21 @@ def _mount_snapshot(device,deadline):
     result=_parse_mount(text,device)
     result['_identity']=hashlib.sha256(text.encode('utf-8')).hexdigest()
     return result
-def _observe(nonce):
+def _observe(nonce,details=False):
     if type(nonce)is not str or not re.fullmatch('[0-9a-f]{32}',nonce):raise ValueError()
+    if type(details)is not bool:raise ValueError()
     deadline=time.monotonic()+3
-    result=dict(version='jsm-test-db-os-2760-v2',nonce=nonce,euid=os_geteuid(),observation_state='PARTIAL',
+    result=dict(version='jsm-test-db-os-2760-v3' if details else 'jsm-test-db-os-2760-v2',nonce=nonce,euid=os_geteuid(),observation_state='PARTIAL',
         processes=[dict(id=r,state='unknown',exe_matches=None,namespace_matches=None,stable=None,
             net_namespace_matches=None,mount_namespace_matches=None,
             load_state=None,active_state=None,pid_available=None) for r in ROLES],
         sockets=[dict(id=r,state='unknown',is_socket=None,kernel_listener=None,owned_by_service_mainpid=None) for r in ('php','mysql')],
         datadir=dict(state='unknown',is_directory=None,filesystem='unknown',device_matches=None),
-        stages=[dict(id=s,attempted=False,completed=False,error='NOT_ATTEMPTED') for s in STAGE_IDS],
+        stages=[dict(id=s,attempted=False,completed=False,error='NOT_ATTEMPTED') for s in (DETAIL_STAGE_IDS if details else STAGE_IDS)],
         effective_api_binding='NOT_ESTABLISHED',test_disk_identity='NOT_ESTABLISHED',db_proof='BLOCKED_TARGET_ADMISSION',sql='NOT_ATTEMPTED')
+    if details:
+        result['additional_services']=[dict(id=r,load_state=None,active_state=None,pid_available=None,stable=None) for r in ADDITIONAL_UNITS]
+        result['namespace_settings']=[dict(id=r,private_tmp=None,private_mounts=None,private_network=None,stable=None) for r in ('apache','php')]
     if result['euid']!=0:return result
     stages={r['id']:r for r in result['stages']}
     def skip(name,error):stages[name]['error']=error
@@ -259,14 +320,15 @@ def _observe(nonce):
         try:
             value=read();stage.update(completed=True,error='NONE')
             if type(value)is dict and value.get('state')=='unknown':
-                error=('NAMESPACE_MISMATCH' if value.get('namespace_matches')is False else
+                error=(value['error'] if details and value.get('error') in DETAIL_ERRORS+('DEADLINE','OS_REFUSED','PARSE_OR_GUARD_REFUSED','SUBPROCESS_REFUSED') else
+                    'NAMESPACE_MISMATCH' if value.get('namespace_matches')is False else
                     'EXE_MISMATCH' if value.get('exe_matches')is False else 'UNAVAILABLE_OR_REFUSED')
                 stage.update(completed=False,error=error)
             elif type(value)is dict and value.get('filesystem')=='unsupported':
                 stage.update(completed=False,error='UNSUPPORTED_LAYOUT')
             return value
         except (OSError,ValueError,UnicodeError,subprocess.SubprocessError) as error:
-            code=('DEADLINE' if time.monotonic()>=deadline else
+            code=('DEADLINE' if time.monotonic()>=deadline else _error_code(error) if details else
                 'OS_REFUSED' if isinstance(error,OSError) else
                 'SUBPROCESS_REFUSED' if isinstance(error,subprocess.SubprocessError) else 'PARSE_OR_GUARD_REFUSED')
             stage.update(completed=False,error=code)
@@ -275,6 +337,12 @@ def _observe(nonce):
         if stages[name]['attempted']:stages[name].update(completed=False,error=error)
     observed={};socket_metadata={};mount=None
     first=run('units_begin',lambda:_unit_snapshot(deadline))
+    additional=privacy=None
+    if details:
+        additional=run('additional_units_begin',lambda:_additional_unit_snapshot(deadline))
+        privacy=run('privacy_begin',lambda:_privacy_snapshot(deadline))
+        if privacy is not None and any(v is None for row in privacy.values() for v in row.values()):
+            unconfirmed('privacy_begin','UNKNOWN_PROPERTY_VALUE')
     for role,row in zip(ROLES,result['processes']):
         name=role+'_process_begin'
         if first is None:skip(name,'DEPENDENCY_UNAVAILABLE');continue
@@ -285,7 +353,7 @@ def _observe(nonce):
         proc=run(name,lambda:_proc_snapshot(role,unit['pid'],deadline));observed[role]=proc
         if proc is not None:
             row.update({k:proc[k] for k in ('state','exe_matches','namespace_matches','net_namespace_matches','mount_namespace_matches')})
-    unix=run('unix_begin',lambda:_unix_snapshot(deadline))
+    unix=run('unix_begin',lambda:_unix_snapshot_detailed(deadline) if details else _unix_snapshot(deadline))
     for role,row in zip(('php','mysql'),result['sockets']):
         fs=run(role+'_socket_begin',lambda:_socket_metadata(role,deadline));socket_metadata[role]=fs
         if fs is not None:row.update(state=fs['state'],is_socket=fs['is_socket'])
@@ -304,7 +372,28 @@ def _observe(nonce):
     else:skip('mount_begin','DEPENDENCY_UNAVAILABLE')
     last=run('units_end',lambda:_unit_snapshot(deadline))
     if first is not None and last is not None and first!=last:unconfirmed('units_end','INCONSISTENT')
-    last_unix=run('unix_end',lambda:_unix_snapshot(deadline))
+    if details:
+        additional_end=run('additional_units_end',lambda:_additional_unit_snapshot(deadline))
+        privacy_end=run('privacy_end',lambda:_privacy_snapshot(deadline))
+        if privacy_end is not None and any(v is None for row in privacy_end.values() for v in row.values()):
+            unconfirmed('privacy_end','UNKNOWN_PROPERTY_VALUE')
+        for row in result['additional_services']:
+            role=row['id']
+            if additional is not None:
+                unit=additional[role]
+                row.update(load_state=unit['load'],active_state=unit['active'],pid_available=_pid_ready(unit['pid']))
+            if additional is not None and additional_end is not None:
+                row['stable']=additional[role]==additional_end[role]
+                if not row['stable']:unconfirmed('additional_units_end','INCONSISTENT')
+        for row in result['namespace_settings']:
+            role=row['id']
+            if privacy is not None:row.update(privacy[role])
+            if (privacy is not None and privacy_end is not None
+                    and all(type(v)is bool for v in privacy[role].values())
+                    and all(type(v)is bool for v in privacy_end[role].values())):
+                row['stable']=privacy[role]==privacy_end[role]
+                if not row['stable']:unconfirmed('privacy_end','INCONSISTENT')
+    last_unix=run('unix_end',lambda:_unix_snapshot_detailed(deadline) if details else _unix_snapshot(deadline))
     for role,row in zip(ROLES,result['processes']):
         name=role+'_process_end';proc=observed.get(role)
         if proc and proc['state']=='observed' and first==last:
@@ -350,5 +439,8 @@ def _observe(nonce):
             and all(r['owned_by_service_mainpid'] is True for r in result['sockets'])
             and result['datadir']==dict(state='observed',is_directory=True,filesystem='local_block',device_matches=True)):
         result['observation_state']='OBSERVED'
+    if details and (not all(row['stable']is True for row in result['additional_services']+result['namespace_settings'])
+            or not all(stage['completed'] for stage in result['stages'])):
+        result['observation_state']='PARTIAL'
     return result
 '''
