@@ -52,8 +52,9 @@ def missing(row,components,index,parents,directory,root,root_identity):
     # Only an explicit no-follow stat ENOENT reaches here. An open/read failure,
     # permission denial, ENOTDIR or an unknown/missing base is never ABSENT.
     base_count=len(BASE.strip('/').split('/'))
-    row['type']='missing' if index==len(components)-1 else 'missing_parent'
-    if row['path'] not in PATHS[-2:] or index<base_count:return row
+    if row['path'] not in PATHS[-2:] or index<base_count:
+        row['type']='missing' if index==len(components)-1 else 'missing_parent'
+        return row
     if not stable(parents,root,root_identity):
         row['type']='unstable';return row
     try:
@@ -308,6 +309,36 @@ def main():
                               installed_release_sha=None,deploy_acceptance='NOT_ESTABLISHED'),sort_keys=True))
         return 1
     finally:signal.setitimer(signal.ITIMER_REAL,0)
+
+
+def article_main():
+    """Separate fixed entry point; the historical CLI and its receipt stay intact."""
+    def expired(*_):raise Refused('OVERALL_DEADLINE')
+    source_sha=run_url=None
+    allowed={'NO_ARGUMENTS_OR_INPUTS_ACCEPTED','OWNER_MANUAL_MAIN_FRONT_SHA_WORKFLOW_REQUIRED',
+             'FIXED_FRONT_SHA_WORKFLOW_REQUIRED','PROTECTED_OWNER_MAIN_ENVIRONMENT_REQUIRED',
+             'ADMIN_SSH_KEY_NOT_CONFIGURED','EXACT_TRUSTED_HOST_PIN_REQUIRED','NONCE_REQUIRED',
+             'FRONT_SHA_TRANSPORT_BOUND_OR_DEADLINE','SSH_KEY_LOAD_OR_AUTH_OR_COMMAND_FAILED',
+             'REMOTE_SCHEMA_NONCE_OR_ROOT_REJECTED','OVERALL_DEADLINE'}
+    try:
+        if len(sys.argv)!=1:raise Refused('NO_ARGUMENTS_OR_INPUTS_ACCEPTED')
+        article_context_ready(os.environ)
+        source_sha=os.environ['GITHUB_SHA']
+        run_url='https://github.com/'+REPO+'/actions/runs/'+os.environ['GITHUB_RUN_ID']
+        signal.signal(signal.SIGALRM,expired);signal.setitimer(signal.ITIMER_REAL,60)
+        result=article_collect(Api(),os.environ)
+    except Exception as error:
+        reason=str(error) if isinstance(error,Refused) and str(error) in allowed else 'ARTICLE_SOURCE_SHA_PROBE_REJECTED'
+        result=dict(receipt_version=ARTICLE_VERSION,status='BLOCKED',reason=reason,
+                    files=[dict(path=p,type='not_observed',sha256=None,size=None,missing_component=None) for p in ARTICLE_PATHS],
+                    root_identity=None,writes_performed=False,installed_release_sha=None,
+                    atomic_multi_file_snapshot=False,deploy_acceptance='NOT_ESTABLISHED')
+    finally:signal.setitimer(signal.ITIMER_REAL,0)
+    result.update(resource='hostinger:srv1687281',domain='jsmjapan.com',ip='187.77.118.50',ssh_port=17177,
+                  known_hosts_sha256=PIN_SHA256,source_sha=source_sha,workflow_run_url=run_url,
+                  verified_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'))
+    print(json.dumps(result,sort_keys=True))
+    return 0 if result['status']=='PROD_FRONT_SEVEN_METADATA_COMPLETE' else 1
 
 
 if __name__=='__main__':raise SystemExit(main())
