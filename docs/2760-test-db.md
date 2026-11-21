@@ -1,3 +1,15 @@
+# 21.11.2026 — socket-binding candidate: SOURCE CORE ONLY, NOT_RUN
+
+[Plan7061948273](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7061948273),
+[owner CODE READY7061957410](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7061957410).
+First reviewable chunk: closed fixed unit-reciprocity parser and a separate
+Docker kernel LISTEN selector accepting legitimate connected rows with the same
+path. Duplicate/malformed listeners refuse; filesystem inode is not compared
+with the kernel socket inode. No runtime entry or connection behavior changed
+in this chunk; process/FD proof, single-connection v5 integration and final
+reviews continue in the same PR. Only two new paths were added to offline CI
+filters; operational jobs, permissions, environments and guards are unchanged.
+
 # 21.11.2026 — bounded passive Docker discovery, child v4
 
 **SOURCE CANDIDATE / RUNTIME NOT_RUN / DB ADMISSION BLOCKED.**
