@@ -1,3 +1,84 @@
+# 21.11.2026 — bounded passive Docker discovery, child v4
+
+**SOURCE CANDIDATE / RUNTIME NOT_RUN / DB ADMISSION BLOCKED.**
+[Approved plan7061532578](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7061532578),
+[owner CODE READY7061596354](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7061596354).
+Base control main `256c539cabaa6a58ea6facb258aa5cc0bf37e31e`; only GCE TEST
+`dark-berm-508215-d2 / asia-northeast1-a / jsm-sandbox / 150919059249400713`,
+configured develop.jsmjapan.com /34.104.157.63:22. These are existing configured
+pins, not new provider identity or installed application evidence.
+
+The same protected profile now requests child v4; pure default v2 and detailed
+v3 observer/projection routes remain available and unchanged in meaning. v4
+adds only `docker_discovery`; its existing 22 OS stages and SQL terminal barrier
+remain. No new workflow, inputs, permissions, credentials or environment.
+
+- One fixed AF_UNIX connection to `/run/docker.sock` and exactly one
+  `GET /containers/json?all=1&size=0&limit=9` (HTTP/1.0, Connection: close).
+  No TCP, Docker CLI/context/auth configuration, version negotiation, retries,
+  fallback endpoints, inspect, logs or container execution.
+- Existing no-follow parent traversal/stamp/typed systemd readers are reused.
+  Parents must be root-owned directories without group/world write; leaf must
+  be a root-owned Unix socket without world write (normal root:docker0660 is
+  supported). Parent/leaf symlinks or changed socket metadata refuse the read.
+- Before GET, Linux SO_PEERCRED uid must be0 and peer PID must equal the typed
+  active Docker MainPID from the already authorized fixed unit lookup. Docker
+  unit metadata and socket stamps are compared again at the end. Observations
+  are sampled, not atomic. No process/env/argv/FD scan of container or Docker
+  PIDs is added. A systemd/inherited listener may report PID1 or its creator;
+  that layout deliberately returns UNKNOWN/PEER_REFUSED, even with uid0. No
+  PID1 fallback, new rights or namespace admission exception exists.
+- One absolute0.75s request deadline (including path/connect/peer/HTTP work),
+  header≤8192B, body≤65536B. Existing total child3s/root timeout4s/outer5s,
+  SSH≤15s/output16384B and root output12288B stay unchanged. Extra observations
+  can exhaust the old budget: PARTIAL/DEADLINE is honest, never an empty PASS.
+  Only bounded200 JSON is accepted. Chunked/transfer-encoding, redirects,
+  duplicate/folded headers, conflicting lengths, truncation, duplicate JSON
+  keys/IDs or malformed response shapes refuse. No raw error is forwarded.
+- Up to8 typed container IDs, immutable ImageIDs and reference-family enums
+  mysql/mariadb/other/unknown; TCP3306 exposed/published and loopback/nonloopback
+  booleans only. Published means container TCP3306 is mapped to any host port;
+  raw IP/port/name/tag values are not emitted. Image family describes only the
+  summary reference, not a verified image binary or DB service. Missing or
+  unsupported image/port facts remain null/unknown and INCOMPLETE. A ninth
+  entry is LIMIT_EXCEEDED/INCOMPLETE, never evidence of zero containers.
+- Summary Command/Labels/Mounts/Names and references may arrive in capped
+  private parser memory; they are discarded without report extraction,
+  serialization, logs or files. No inspect/Env/Args/health logs/configuration,
+  DB credentials, volume contents, SQL, Yii/application/provider requests,
+  installations, lifecycle changes or server writes are implemented.
+
+`docker_discovery` has a closed state/attempted/error/containers schema. Its
+attempt flag is set immediately before sendall (including partial/failed sends).
+A changed daemon/socket invalidates results, including the ninth-entry case.
+OBSERVED means only this guarded metadata observation; observed IDs never become
+an independent expected baseline. Whole installed source, effective API→DB,
+DB identity/principals/grants, synthetic provenance and isolation remain
+NOT_ESTABLISHED; outer receipt is always BLOCKED/exit1 and SQL NOT_ATTEMPTED.
+Existing Apache/PHP namespace mismatch is not accepted or bypassed.
+
+Offline checks exercise actual parser/connector/projection functions with
+synthetic OS/socket fixtures: private canaries,8/9 limit, invalid types/ports,
+peer refusal before GET, absolute slowloris deadline, path/daemon/socket drift,
+framing limits and legacy v2/v3 behavior. Two Linux-only AF_UNIX fixtures check
+real transport and inherited-listener creator PID semantics; root uid/path
+positive metadata are synthetic doubles, not actual root/TEST acceptance.
+They explicitly SKIP on macOS; Linux CI is separately required. No real Docker
+socket, server, database or provider is contacted by the tests. Exact counts,
+frozen SHA, CI and two independent non-author reviews belong in PR19.
+
+Reuse search found no existing AF_UNIX Docker summary/peer reader. A focused
+adjacent `scripts/test_db_docker_metadata.py` holds this responsibility, rather
+than a new architecture or generic command/client API. Existing protected
+transport, root wrapper, policy gates and operational workflow remain reused.
+Only its two source/test paths were added to both existing offline CI filters;
+coverage checks require all current scripts/tests to trigger CI.
+
+Merge and a new one-shot require separate exact owner approval after two
+non-author frozen-head PASS and CI. This source preparation authorizes neither.
+Source rollback is a normal revert. Root alone maintains the issue/journal;
+the old v1–v3 history below does not change the new runtime NOT_RUN status.
+
 # 21.11.2026 — уточнение fixed TEST OS metadata, child v3
 **SOURCE CANDIDATE / RUNTIME NOT_RUN / DB ADMISSION BLOCKED.** Продолжение
 [плана7060941419](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7060941419),
