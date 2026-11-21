@@ -21,6 +21,10 @@ from hostinger_preflight import Api, GH_ENV, GH_REPO, GITHUB, REPO, policy_ready
 from hostinger_preflight import Refused as PolicyRefused
 
 VERSION = 'jsm-prod-front-sha-v1'
+ARTICLE_VERSION = 'jsm-prod-article-sources-sha-2767-v1'
+ARTICLE_PATHS = ('config/articleSeo.js', 'config/client.js', 'config/server.js', 'src/App.tsx',
+                 'src/pages/MainFlow/BlogArticle/index.tsx', 'src/helpers/articleFirstHtml.js',
+                 'src/components/ArticleFirstHtml/index.tsx')
 EXPECTED = {
     'config/articleSeo.js': '8b6576b90cb6f1a3475805f976b15e906009c5652bff0f35db0747c23eab9a4b',
     'src/pages/MainFlow/BlogArticle/index.tsx': '725ba79b928ba95331fc8cd42e53b3bc32a01336900fe658e48392f32999a447',
@@ -32,20 +36,49 @@ EXPECTED = {
 # opened by descriptor with O_NOFOLLOW; regular single-link files are required.
 REMOTE = r'''import hashlib,json,os,stat
 BASE='/var/www/jsmjapan.com-front'
-PATHS=('config/articleSeo.js','src/pages/MainFlow/BlogArticle/index.tsx','src/helpers/blogArticleSchema.js')
+DETAIL=globals().get('ARTICLE_PROFILE') is True
+PATHS=ARTICLE_PATHS if DETAIL else ('config/articleSeo.js','src/pages/MainFlow/BlogArticle/index.tsx','src/helpers/blogArticleSchema.js')
 LIMIT=1048576
 NOATIME=0x40000
 def identity(s):
     return (s.st_dev,s.st_ino,s.st_mode,s.st_nlink,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+def stable(parents,root,root_identity):
+    if identity(os.fstat(root))!=root_identity:return False
+    for parent,component,directory,expected in parents:
+        if identity(os.fstat(directory))!=expected or identity(os.stat(component,dir_fd=parent,follow_symlinks=False))!=expected:
+            return False
+    return True
+def missing(row,components,index,parents,directory,root,root_identity):
+    # Only an explicit no-follow stat ENOENT reaches here. An open/read failure,
+    # permission denial, ENOTDIR or an unknown/missing base is never ABSENT.
+    base_count=len(BASE.strip('/').split('/'))
+    row['type']='missing' if index==len(components)-1 else 'missing_parent'
+    if row['path'] not in PATHS[-2:] or index<base_count:return row
+    if not stable(parents,root,root_identity):
+        row['type']='unstable';return row
+    try:
+        os.stat(components[index],dir_fd=directory,follow_symlinks=False)
+    except FileNotFoundError:
+        if not stable(parents,root,root_identity):
+            row['type']='unstable';return row
+        row.update(type='absent',missing_component='/'.join(components[base_count:index+1]))
+        return row
+    row['type']='unstable';return row
 def one(path):
     row=dict(path=path,type='unreadable',sha256=None)
+    if DETAIL:row.update(size=None,missing_component=None)
     directories=[]; parents=[]; fd=None
     try:
         directory=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
         directories.append(directory)
-        for component in (BASE+'/'+path).strip('/').split('/')[:-1]:
+        root_identity=identity(os.fstat(directory)) if DETAIL else None
+        components=(BASE+'/'+path).strip('/').split('/')
+        for index,component in enumerate(components[:-1]):
             parent=directory
-            linked=os.stat(component,dir_fd=parent,follow_symlinks=False)
+            try:linked=os.stat(component,dir_fd=parent,follow_symlinks=False)
+            except FileNotFoundError:
+                if DETAIL:return missing(row,components,index,parents,parent,directories[0],root_identity)
+                raise
             directory=os.open(component,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent)
             directories.append(directory)
             opened=os.fstat(directory)
@@ -53,7 +86,10 @@ def one(path):
                 row['type']='unstable';return row
             parents.append((parent,component,directory,identity(opened)))
         name=path.split('/')[-1]
-        before=os.stat(name,dir_fd=directory,follow_symlinks=False)
+        try:before=os.stat(name,dir_fd=directory,follow_symlinks=False)
+        except FileNotFoundError:
+            if DETAIL:return missing(row,components,len(components)-1,parents,directory,directories[0],root_identity)
+            raise
         if not stat.S_ISREG(before.st_mode):
             row['type']='not_regular';return row
         if before.st_nlink!=1:
@@ -79,10 +115,13 @@ def one(path):
         for parent,component,directory,expected in parents:
             if identity(os.fstat(directory))!=expected or identity(os.stat(component,dir_fd=parent,follow_symlinks=False))!=expected:
                 row['type']='unstable';return row
+        if DETAIL and not stable(parents,directories[0],root_identity):
+            row['type']='unstable';return row
         row.update(type='regular',sha256=digest.hexdigest())
+        if DETAIL:row['size']=total
         return row
     except FileNotFoundError:
-        row['type']='missing';return row
+        row['type']='unstable' if DETAIL else 'missing';return row
     except OSError:
         return row
     finally:
@@ -91,17 +130,24 @@ def one(path):
 def read_files():
     return [one(path) for path in PATHS]
 def main():
-    rows=read_files() if getattr(os,'O_NOATIME',None)==NOATIME and os.geteuid()==0 else [dict(path=p,type='unreadable',sha256=None) for p in PATHS]
-    print(json.dumps(dict(version='jsm-prod-front-sha-v1',nonce=NONCE,euid=os.geteuid(),files=rows,writes_performed=False),sort_keys=True))
+    if getattr(os,'O_NOATIME',None)==NOATIME and os.geteuid()==0:rows=read_files()
+    else:
+        rows=[dict(path=p,type='unreadable',sha256=None) for p in PATHS]
+        if DETAIL:
+            for row in rows:row.update(size=None,missing_component=None)
+    version='jsm-prod-article-sources-sha-2767-v1' if DETAIL else 'jsm-prod-front-sha-v1'
+    print(json.dumps(dict(version=version,nonce=NONCE,euid=os.geteuid(),files=rows,writes_performed=False),sort_keys=True))
 if __name__=='__main__':main()
 '''
 
 
-def context_ready(env):
+def _context_ready(env,workflow):
+    if workflow not in ('prod-front-sha-readonly.yml','prod-article-sources-sha-readonly.yml'):
+        raise Refused('FIXED_FRONT_SHA_WORKFLOW_REQUIRED')
     expected = dict(GITHUB_REPOSITORY=REPO, GITHUB_ACTOR='JSMJapan', GITHUB_TRIGGERING_ACTOR='JSMJapan',
                     GITHUB_REF='refs/heads/main', GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_RUN_ATTEMPT='1',
                     GITHUB_SERVER_URL='https://github.com', GITHUB_API_URL='https://api.github.com',
-                    GITHUB_WORKFLOW_REF=REPO+'/.github/workflows/prod-front-sha-readonly.yml@refs/heads/main')
+                    GITHUB_WORKFLOW_REF=REPO+'/.github/workflows/'+workflow+'@refs/heads/main')
     if (any(env.get(name) != value for name,value in expected.items())
             or not re.fullmatch('[0-9a-f]{40}',env.get('GITHUB_SHA',''))
             or env.get('GITHUB_WORKFLOW_SHA') != env.get('GITHUB_SHA')
@@ -109,10 +155,25 @@ def context_ready(env):
         raise Refused('OWNER_MANUAL_MAIN_FRONT_SHA_WORKFLOW_REQUIRED')
 
 
+def context_ready(env):
+    _context_ready(env,'prod-front-sha-readonly.yml')
+
+
+def article_context_ready(env):
+    _context_ready(env,'prod-article-sources-sha-readonly.yml')
+
+
 def remote_program(nonce):
     if type(nonce) is not str or not re.fullmatch('[0-9a-f]{32}',nonce):
         raise Refused('NONCE_REQUIRED')
     return ("NONCE='"+nonce+"'\n"+REMOTE).encode('ascii')
+
+
+def article_remote_program(nonce):
+    # Fixed code-only profile; no path/profile value comes from a caller or input.
+    if type(nonce) is not str or not re.fullmatch('[0-9a-f]{32}',nonce):raise Refused('NONCE_REQUIRED')
+    return ('ARTICLE_PROFILE=True\nARTICLE_PATHS='+repr(ARTICLE_PATHS)+'\n'+
+            "NONCE='"+nonce+"'\n"+REMOTE).encode('ascii')
 
 
 def project_remote(raw,nonce):
@@ -146,8 +207,55 @@ def project_remote(raw,nonce):
         raise Refused('REMOTE_SCHEMA_NONCE_OR_ROOT_REJECTED') from None
 
 
-def collect(api,env):
-    context_ready(env)
+def article_project_remote(raw,nonce):
+    def pairs(items):
+        result={}
+        for key,value in items:
+            if key in result:raise ValueError()
+            result[key]=value
+        return result
+    def invalid(_):raise ValueError()
+    try:
+        if type(raw) is not bytes or len(raw)>4096:raise ValueError()
+        value=json.loads(raw.decode('ascii'),object_pairs_hook=pairs,parse_constant=invalid)
+        if (type(value) is not dict or set(value)!={'version','nonce','euid','files','writes_performed'}
+                or value['version']!=ARTICLE_VERSION or value['nonce']!=nonce
+                or type(value['euid']) is not int or value['euid']!=0 or value['writes_performed'] is not False
+                or type(value['files']) is not list or len(value['files'])!=7):raise ValueError()
+        rows=[]
+        for index,(item,path) in enumerate(zip(value['files'],ARTICLE_PATHS)):
+            if (type(item) is not dict or set(item)!={'path','type','sha256','size','missing_component'} or item['path']!=path
+                    or item['type'] not in ('regular','absent','missing','missing_parent','not_regular','unsafe','unstable','oversize','unreadable')):raise ValueError()
+            if item['type']=='regular':
+                if (type(item['sha256']) is not str or not re.fullmatch('[0-9a-f]{64}',item['sha256'])
+                        or type(item['size']) is not int or not 0<=item['size']<=1048576
+                        or item['missing_component'] is not None):raise ValueError()
+            elif item['sha256'] is not None or item['size'] is not None:raise ValueError()
+            if item['type']=='absent':
+                prefixes=['/'.join(path.split('/')[:n]) for n in range(1,len(path.split('/'))+1)]
+                if index<5 or item['missing_component'] not in prefixes:raise ValueError()
+            elif item['missing_component'] is not None:raise ValueError()
+            rows.append(dict(item))
+        complete=all(row['type']==('regular' if i<5 else 'absent') for i,row in enumerate(rows))
+        return dict(receipt_version=ARTICLE_VERSION,status='PROD_FRONT_SEVEN_METADATA_COMPLETE' if complete else 'BLOCKED',
+                    reason='FIVE_REGULAR_TWO_PROVEN_ABSENT' if complete else 'FILE_STATE_NOT_EXPECTED_OR_UNPROVEN',
+                    files=rows,root_identity=True,writes_performed=False,installed_release_sha=None,
+                    atomic_multi_file_snapshot=False,deploy_acceptance='NOT_ESTABLISHED')
+    except Exception:raise Refused('REMOTE_SCHEMA_NONCE_OR_ROOT_REJECTED') from None
+
+
+def article_bounded_ssh(command,program):
+    # Reuse the existing tempfile-backed, process-group bounded transport. A
+    # non-reading SSH child must not block while the larger capsule is written.
+    from apache_parity_bridge import _bounded, Refused as BoundedRefused
+    try:code,raw=_bounded(command,data=program,limit=4096,timeout=15)
+    except BoundedRefused:raise Refused('FRONT_SHA_TRANSPORT_BOUND_OR_DEADLINE') from None
+    if code!=0:raise Refused('SSH_KEY_LOAD_OR_AUTH_OR_COMMAND_FAILED')
+    return raw
+
+
+def _collect(api,env,context_check,program_builder,projector,transport):
+    context_check(env)
     repo=api.get_json(GITHUB,GH_REPO)
     environment=api.get_json(GITHUB,GH_ENV)
     branches=api.get_json(GITHUB,GH_ENV+'/deployment-branch-policies')
@@ -171,10 +279,18 @@ def collect(api,env):
                  '-o','ConnectTimeout=7','-o','ConnectionAttempts=1','-o','ServerAliveInterval=3',
                  '-o','ServerAliveCountMax=2','-o','LogLevel=ERROR',
                  'root@187.77.118.50','/usr/bin/python3','-I','-B','-']
-        result=project_remote(bounded_ssh(command,remote_program(nonce)),nonce)
+        result=projector(transport(command,program_builder(nonce)),nonce)
     return dict(result,resource='hostinger:srv1687281',domain='jsmjapan.com',ip='187.77.118.50',
                 ssh_port=17177,known_hosts_sha256=PIN_SHA256,source_sha=env['GITHUB_SHA'],
                 workflow_run_url='https://github.com/'+REPO+'/actions/runs/'+env['GITHUB_RUN_ID'])
+
+
+def collect(api,env):
+    return _collect(api,env,context_ready,remote_program,project_remote,bounded_ssh)
+
+
+def article_collect(api,env):
+    return _collect(api,env,article_context_ready,article_remote_program,article_project_remote,article_bounded_ssh)
 
 
 def main():
