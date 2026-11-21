@@ -1,14 +1,98 @@
-# 21.11.2026 — socket-binding candidate: SOURCE CORE ONLY, NOT_RUN
+# 21.11.2026 — positive systemd socket binding before the same GET, child v5
 
-[Plan7061948273](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7061948273),
+**SOURCE CANDIDATE / RUNTIME NOT_RUN / DB ADMISSION BLOCKED.**
+[Approved plan7061948273](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7061948273),
 [owner CODE READY7061957410](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7061957410).
-First reviewable chunk: closed fixed unit-reciprocity parser and a separate
-Docker kernel LISTEN selector accepting legitimate connected rows with the same
-path. Duplicate/malformed listeners refuse; filesystem inode is not compared
-with the kernel socket inode. No runtime entry or connection behavior changed
-in this chunk; process/FD proof, single-connection v5 integration and final
-reviews continue in the same PR. Only two new paths were added to offline CI
-filters; operational jobs, permissions, environments and guards are unchanged.
+Base control main `dc0557240759e8b98f9129e7f9cf7b7308c7b355`; only the existing
+GCE TEST jsm-sandbox/develop.jsmjapan.com target. Actual prior PEER_REFUSED/GET0
+proves neither its UID/PID cause nor socket activation. No new runtime occurred.
+
+The existing protected entry requests child v5. Pure v2/detailed v3/discovery v4
+remain supported; the new code-owned `binding=False` default preserves the
+exact-MainPID gate. v5 adds closed `docker_binding` diagnostics and requests
+`binding=True`. The outer DB scope receipt and terminal SQL BLOCKED are unchanged.
+
+## One connection, not a fallback/retry
+
+The same existing `_docker_begin` performs exactly one fixed socket connection
+and one peer credential read. On that connected fd, default v4 requires root
+peer/exact typed Docker MainPID as before. In v5, the same direct case requires
+no new association query. Only an observed root peer PID1 may enter a new positive
+association branch. Other UID/PID, invalid credentials or unavailable facts do
+not send GET. There is no reconnect, retry, CLI, TCP or PID1-only acceptance.
+
+Before the fixed existing GET, the new branch requires all of:
+
+- loaded/active docker.socket, SubState=listening, Accept=no, exactly one
+  `/run/docker.sock (Stream)` and Triggers=docker.service; reciprocal loaded/
+  active/running docker.service with TriggeredBy=docker.socket. One fixed query
+  shape Id/LoadState/ActiveState/SubState/Accept/Listen/Triggers/TriggeredBy uses
+  the existing bounded systemctl transport. No unit file, ExecStart or Env read.
+- Fixed PID1 executable exactly `/lib/systemd/systemd` or
+  `/usr/lib/systemd/systemd`, and typed Docker MainPID executable exactly
+  `/usr/bin/dockerd`. Other native paths/layouts remain UNKNOWN. No executable
+  is run. Starttime/exe and net/mnt/PID namespace identities must be stable and
+  match the observer's namespaces; no namespace enter or guard exception.
+- One valid AF_UNIX STREAM LISTEN row for the fixed path. Protocol must be zero;
+  duplicate/malformed target rows refuse. Legitimate connected rows with the
+  same path are not duplicate LISTENs. Old PHP/MySQL Unix parser is unchanged.
+- The LISTEN **kernel socket inode** must belong to bounded FD sets of both
+  PID1 and the typed Docker MainPID. It is never compared with filesystem inode.
+  Each role retains stable identity around its scan; both retain the same
+  listener capability before/after. Unrelated FD churn is permitted. Existing
+ 128FD/process and64KiB/proc caps remain. No other processes/config/argv/env or
+  file/volume contents are scanned.
+- Existing root/no-follow filesystem socket guards and stamps, together with
+  unit/process/namespace/listener identities, remain stable. Same connected fd
+  performs the same single GET `/containers/json?all=1&size=0&limit=9` only after
+  prechecks pass; postchecks compare against that private captured proof.
+
+The activation branch carries its original absolute until=min(rootdeadline,
+start+.75s) through the posthook. It never resets the deadline after proof/GET.
+The direct/default path retains its prior rootdeadline finish semantics.
+Existing total child3s/root4s/outer5s, systemctl0.7s/4096B, header8KiB/body64KiB,
+8containers/9sentinel, output and SSH bounds remain unchanged. If proof cannot
+finish within these bounds, return UNKNOWN rather than widen them.
+
+## Honest phases and closed output
+
+The public binding packet contains only fixed mode/state/peer-kind/reason enums
+and boolean/null precondition axes. No raw PID, UID, executable/ns/FD links,
+listener inode, unit text, paths or API summary are published or saved. Axes
+record pre-GET observations; combined namespaces are true only after both roles
+are validated. Before_proved is set only after the final pre-GET socket guard.
+After_stable is unset when no postcheck ran. SKIPPED means the association was
+not entered; UNKNOWN is a refused/incomplete proof; PROVED requires stable end
+checks. Container projection requires PROVED. Binding and HTTP parsing facts
+are independent: a proven association can still receive refused HTTP data.
+
+Any ambiguity before GET preserves attempted=false/GET0. Drift or deadline
+**after** GET discards containers and preserves attempted=true/UNKNOWN; it
+cannot retroactively promise zero GET. A late successful old Unix stage cannot
+repair an earlier refused snapshot; the new proof uses its own bounded samples,
+without retry. These are sampled checks, not atomic or exclusive-handler proof.
+No observed identity becomes a trusted DB baseline. DB identity, API→DB,
+grants/provenance/isolation remain NOT_ESTABLISHED; SQL is never attempted.
+
+Offline tests cover fixed reciprocity, unknown peer axes, protocol/duplicate
+LISTENs, exe/ns/FD refusal, pre/post drift,128FD guards inherited from the reused
+reader, absolute deadline and unrelated FD churn; actual one-connect/one-GET
+behavior, strict projection, v5 and old routes, null-port privacy regressions.
+The Linux-only inherited-listener fixture exercises native peer creator PID,
+shared kernel FD and AF_UNIX wire. Root UID/fixed role PID/exe/ns/unit metadata
+are explicit synthetic mappings, not host PID1/root or TEST acceptance. It
+SKIPs on Mac and requires Linux CI. No real daemon/server/SQL/provider calls.
+
+One focused adjacent binding module reuses existing OS/path/socket/HTTP/root
+transport helpers. Only a fourth fixed systemctl query shape and v5 dispatch/
+closed projection were added; policy, keys, environments, workflow jobs/inputs/
+action pins and old namespace barriers stay unchanged. Two new source/test
+paths were added to both existing offline CI filters. Exact preservation audit,
+file sizes, frozen SHA, full tests/CI and root+B reviews belong in PR20.
+
+Merge and one actual run require a new exact owner decision after two non-author
+SOURCE PASS and exact CI. This CODE READY does not authorize either. Source
+rollback is a normal revert; root alone maintains the issue/release journal.
 
 # 21.11.2026 — bounded passive Docker discovery, child v4
 

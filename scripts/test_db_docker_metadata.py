@@ -135,14 +135,20 @@ def _docker_socket_metadata(deadline):
 def _docker_unit_ready(unit):
     return (type(unit)is dict and set(unit)=={'load','active','pid'} and unit['load']=='loaded'
         and unit['active']=='active' and _pid_ready(unit['pid']))
-def _docker_begin(unit,deadline):
+def _docker_begin(unit,deadline,binding=False):
+    if type(binding)is not bool:raise ValueError()
     attempted=False;connection=None;verified=False;identity=None
+    info=_binding_new() if binding else None
+    def attach(value):
+        if info is not None:value['binding']=info
+        return value
     def refused(code):
         result=dict(public=_docker_packet(code,attempted))
         if attempted and verified:result.update(unit=dict(unit),identity=identity)
-        return result
+        return attach(result)
     try:
         until=min(deadline,time.monotonic()+.75);_docker_remaining(until)
+        if info is not None:info['until']=until
         if not _docker_unit_ready(unit):raise DockerRefused('UNIT_UNAVAILABLE')
         if not hasattr(socket,'SO_PEERCRED'):raise DockerRefused('UNSUPPORTED')
         identity=_docker_socket_metadata(until)
@@ -150,21 +156,30 @@ def _docker_begin(unit,deadline):
         connection.settimeout(_docker_remaining(until));connection.connect('/run/docker.sock')
         _docker_remaining(until)
         credentials=connection.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,struct.calcsize('iII'))
-        if type(credentials)is not bytes or len(credentials)!=struct.calcsize('iII'):raise DockerRefused('PEER_REFUSED')
+        if type(credentials)is not bytes or len(credentials)!=struct.calcsize('iII'):
+            if info is not None:_binding_refused(info,'PEER_SCHEMA_REFUSED')
+            raise DockerRefused('PEER_REFUSED')
         pid,uid,_=struct.unpack('iII',credentials)
-        # Socket-activated/inherited listener PID1 is intentionally unsupported.
-        if uid!=0 or pid!=unit['pid']:raise DockerRefused('PEER_REFUSED')
+        # Default preserves exact MainPID. Only the v5 hook can prove PID1 binding.
+        if info is not None:_binding_before(info,pid,uid,unit,identity,until)
+        elif uid!=0 or pid!=unit['pid']:raise DockerRefused('PEER_REFUSED')
         if identity!=_docker_socket_metadata(until):raise DockerRefused('SOCKET_CHANGED')
+        if info is not None:info['public']['before_proved']=True
         verified=True
         connection.settimeout(_docker_remaining(until));attempted=True
         connection.sendall(b'GET /containers/json?all=1&size=0&limit=9 HTTP/1.0\r\nHost: docker\r\nConnection: close\r\n\r\n')
         body=_docker_http_response(connection,until);rows=_docker_parse_body(body);_docker_remaining(until)
         complete=all(row['image_id']is not None and row['image_family']!='unknown'
             and all(type(row[k])is bool for k in ('port3306_exposed','port3306_published','port3306_loopback','port3306_nonloopback')) for row in rows)
-        return dict(public=_docker_packet('NONE' if complete else 'SUMMARY_UNKNOWN',True,rows),unit=dict(unit),identity=identity)
-    except DockerRefused as error:return refused(error.code)
-    except (socket.timeout,TimeoutError):return refused('DEADLINE')
+        return attach(dict(public=_docker_packet('NONE' if complete else 'SUMMARY_UNKNOWN',True,rows),unit=dict(unit),identity=identity))
+    except DockerRefused as error:
+        if info is not None:_binding_refused(info,getattr(error,'reason',error.code))
+        return refused(error.code)
+    except (socket.timeout,TimeoutError):
+        if info is not None:_binding_refused(info,'DEADLINE')
+        return refused('DEADLINE')
     except Exception as error:
+        if info is not None:_binding_refused(info,'DEADLINE' if getattr(error,'code',None)=='DEADLINE' else 'OS_REFUSED')
         return refused('DEADLINE' if getattr(error,'code',None)=='DEADLINE' else 'OS_REFUSED')
     finally:
         if connection is not None:
@@ -172,14 +187,20 @@ def _docker_begin(unit,deadline):
             except OSError:pass
 def _docker_finish(pending,unit,deadline):
     if 'unit' not in pending:return pending['public']
+    info=pending.get('binding')
+    if info is not None and info['public']['mode']=='SYSTEMD':deadline=min(deadline,info['until'])
     try:
         _docker_remaining(deadline)
         if not _docker_unit_ready(unit) or pending['unit']!=unit:raise DockerRefused('DAEMON_CHANGED')
         if pending['identity']!=_docker_socket_metadata(deadline):raise DockerRefused('SOCKET_CHANGED')
         _docker_remaining(deadline)
+        if info is not None:_binding_after(info,unit,deadline)
         return pending['public']
-    except DockerRefused as error:return _docker_packet(error.code,pending['public']['attempted'])
+    except DockerRefused as error:
+        if info is not None:_binding_refused(info,getattr(error,'reason',error.code),after=True)
+        return _docker_packet(error.code,pending['public']['attempted'])
     except Exception as error:
+        if info is not None:_binding_refused(info,'DEADLINE' if getattr(error,'code',None)=='DEADLINE' else 'OS_REFUSED',after=True)
         return _docker_packet('DEADLINE' if getattr(error,'code',None)=='DEADLINE' else 'OS_REFUSED',pending['public']['attempted'])
 '''
 

@@ -126,10 +126,11 @@ def _parse_privacy(text):
     if set(result)!=set(units):raise MetadataRefused('PARSER_REFUSED')
     return result
 def _systemctl_snapshot(properties,units,deadline):
-    # These are the only three code-owned commands. There is no runtime choice,
+    # These are the only four code-owned commands. There is no runtime choice,
     # caller unit, environment/property scan, Docker API or process discovery.
     allowed=((UNIT_PROPERTIES,tuple(UNITS.values())),(UNIT_PROPERTIES,tuple(ADDITIONAL_UNITS.values())),
-        (PRIVACY_PROPERTIES,(UNITS['apache'],UNITS['php'])))
+        (PRIVACY_PROPERTIES,(UNITS['apache'],UNITS['php'])),
+        (('Id','LoadState','ActiveState','SubState','Accept','Listen','Triggers','TriggeredBy'),('docker.socket','docker.service')))
     if (properties,units) not in allowed:raise MetadataRefused('PARSE_OR_GUARD_REFUSED')
     path='/usr/bin/systemctl';fds=[];process=None
     try:
@@ -294,12 +295,13 @@ def _mount_snapshot(device,deadline):
     result=_parse_mount(text,device)
     result['_identity']=hashlib.sha256(text.encode('utf-8')).hexdigest()
     return result
-def _observe(nonce,details=False,discovery=False):
+def _observe(nonce,details=False,discovery=False,binding=False):
     if type(nonce)is not str or not re.fullmatch('[0-9a-f]{32}',nonce):raise ValueError()
     if type(details)is not bool:raise ValueError()
     if type(discovery)is not bool or discovery and not details:raise ValueError()
+    if type(binding)is not bool or binding and not discovery:raise ValueError()
     deadline=time.monotonic()+3
-    result=dict(version='jsm-test-db-os-2760-v4' if discovery else 'jsm-test-db-os-2760-v3' if details else 'jsm-test-db-os-2760-v2',nonce=nonce,euid=os_geteuid(),observation_state='PARTIAL',
+    result=dict(version='jsm-test-db-os-2760-v5' if binding else 'jsm-test-db-os-2760-v4' if discovery else 'jsm-test-db-os-2760-v3' if details else 'jsm-test-db-os-2760-v2',nonce=nonce,euid=os_geteuid(),observation_state='PARTIAL',
         processes=[dict(id=r,state='unknown',exe_matches=None,namespace_matches=None,stable=None,
             net_namespace_matches=None,mount_namespace_matches=None,
             load_state=None,active_state=None,pid_available=None) for r in ROLES],
@@ -311,6 +313,7 @@ def _observe(nonce,details=False,discovery=False):
         result['additional_services']=[dict(id=r,load_state=None,active_state=None,pid_available=None,stable=None) for r in ADDITIONAL_UNITS]
         result['namespace_settings']=[dict(id=r,private_tmp=None,private_mounts=None,private_network=None,stable=None) for r in ('apache','php')]
     if discovery:result['docker_discovery']=_docker_packet()
+    if binding:result['docker_binding']=_binding_new()['public']
     if result['euid']!=0:return result
     stages={r['id']:r for r in result['stages']}
     def skip(name,error):stages[name]['error']=error
@@ -345,7 +348,9 @@ def _observe(nonce,details=False,discovery=False):
         privacy=run('privacy_begin',lambda:_privacy_snapshot(deadline))
         if privacy is not None and any(v is None for row in privacy.values() for v in row.values()):
             unconfirmed('privacy_begin','UNKNOWN_PROPERTY_VALUE')
-    if discovery:docker_pending=_docker_begin(additional.get('docker') if additional is not None else None,deadline)
+    if discovery:
+        unit=additional.get('docker') if additional is not None else None
+        docker_pending=_docker_begin(unit,deadline,binding=True) if binding else _docker_begin(unit,deadline)
     for role,row in zip(ROLES,result['processes']):
         name=role+'_process_begin'
         if first is None:skip(name,'DEPENDENCY_UNAVAILABLE');continue
@@ -397,6 +402,7 @@ def _observe(nonce,details=False,discovery=False):
                 row['stable']=privacy[role]==privacy_end[role]
                 if not row['stable']:unconfirmed('privacy_end','INCONSISTENT')
     if discovery:result['docker_discovery']=_docker_finish(docker_pending,additional_end.get('docker') if additional_end is not None else None,deadline)
+    if binding:result['docker_binding']=_binding_public(docker_pending,result['docker_discovery'])
     last_unix=run('unix_end',lambda:_unix_snapshot_detailed(deadline) if details else _unix_snapshot(deadline))
     for role,row in zip(ROLES,result['processes']):
         name=role+'_process_end';proc=observed.get(role)
