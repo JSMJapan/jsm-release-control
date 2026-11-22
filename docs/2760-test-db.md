@@ -1,3 +1,73 @@
+# 22.11.2026 — installer report contract for active TEST API configuration
+
+**SOURCE CANDIDATE / TRUSTED PRODUCER MISSING / TEST RUNTIME NOT_RUN /
+DB ADMISSION BLOCKED.** Control base `565c13abde4b9e90fb3acd12503f775cca985b6b`.
+Scope is [#2760](https://github.com/JSMJapan/jsm-storefront/issues/2760),
+Google Cloud TEST jsm-sandbox `150919059249400713`,
+dark-berm-508215-d2 / asia-northeast1-a / develop.jsmjapan.com. The existing
+[TEST publish workflow](https://github.com/JSMJapan/jsm-storefront/actions/workflows/sandbox-publish.yml)
+reports only site/API/exit status through its protected forced-command path.
+The installed server-side owner hook needed to create active-serving evidence
+is absent from tracked installer source. The derivative sandbox configuration
+contract in source does not establish the running configuration. No producer,
+signing integration, dispatch, SSH access, install or operational workflow
+change is included here. The default verifier result is BLOCKED.
+
+[`test_db_installer_receipt.py`](../scripts/test_db_installer_receipt.py) is a
+pure renderer and verifier. A future, separately authorized TEST installer must
+invoke the renderer **after** the requested revision is actually serving, while
+the serving generation is held stable across both observations. The installer
+must first verify the effective HTTPS vhost `/api` handler and the pinned
+PHP-FPM 7.4 `[www]` service and matching worker identity. Each observation
+must include the installed site SHA and two separate generation stamps.
+The Apache stamp must bind the live generation's selected include and vhost
+route for `/api` to the exact FastCGI listener. The FPM stamp must bind that
+listener to the active worker and pool generation and its effective API
+configuration. That includes resolving PHP and Yii overrides. Each snapshot
+must bind the **effective** DB descriptor and TEST target identities actually
+selected by that configuration. Requested SHA, active master process alone,
+static file text or an unresolved override cannot supply this evidence. If an observation is unproved, the installer must
+withhold the report. The renderer only serializes the already verified
+nonsecret projection and does not read the VM or establish these facts itself.
+
+The report is canonical ASCII JSON with a final LF, capped at 4 KiB in the
+verifier. The pinned workflow repository, path, `main` ref, dispatch event,
+`sandbox` environment and TEST VM identity are closed constants. Workflow code
+SHA, exact requested and installed SHA, run ID, attempt and actors when known
+are distinguished. The trusted caller must independently authenticate the
+current serving generation, actual run identity and time window from protected
+evidence. The caller also needs an independently authenticated exact report
+SHA-256, producer provenance, and expected nonsecret descriptor and target
+digests. The reference for each digest must be reviewed against the specified
+TEST resource and installed installer generation. Copying pins from the report,
+accepting a caller approval bit or recomputing the report's digest on receipt
+cannot authenticate it. The verifier checks equality with these trusted inputs
+and verifies the caller-supplied current time against the authorized window.
+It does not authenticate the caller, the installer, GitHub or the clock itself.
+
+Only reviewed, versioned projections of nonsecret identities may be hashed.
+Do not hash or publish `.env` files, credential-bearing URIs, user names,
+passwords, keys, raw configuration, process details or customer data. A future
+peer observation must actually bind the application socket and matching
+database listener to the same expected DB target. Proxy or DNAT evidence must
+prove both exact TCP legs and the mapping between them. `PeerEvidence` carries
+digests of separately reviewed, typed nonsecret summaries for the PHP leg,
+DB leg and any forwarding mapping. The projection must distinguish these
+roles by domain, even when the original tuples happen to be symmetric. The independently
+authenticated peer review pin is SHA-256 over ASCII
+`jsm-test-db-installer-peer-v1`, a NUL byte, and the exact canonical report bytes
+to prevent reuse across a different run attempt, generation or observation.
+Without that review or an exact peer observation, `actual_db_peer` is UNKNOWN
+even if `configuration_binding` is VERIFIED. A peer result describes
+correspondence to reviewed evidence and does not query the current database.
+
+No verdict authenticates the claimed schema or changes TEST isolation, data
+provenance, grants, SQL permission or DB admission. This helper is disconnected from the existing runtime and from
+deployment gates. Only offline auto-PR test path filters were extended.
+Activation requires a separately reviewed and authorized change to the owner
+installer, protected provenance inputs from GitHub, and verified current
+evidence. The rollback of this source candidate is a reviewed revert.
+
 # 22.11.2026 — one passive FPM loopback socket witness in TEST
 
 **SOURCE CANDIDATE / TEST RUNTIME NOT_RUN / DB ADMISSION BLOCKED.**
