@@ -18,7 +18,7 @@ import tempfile
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from apache_parity_bridge import Refused, _bounded, strict_json
+from apache_parity_bridge import Refused, _bounded, strict_json, GITHUB_POLICY_ENDPOINTS, GITHUB_POLICY_STATUSES
 from hostinger_preflight import policy_ready
 from test_api_readonly_access import TestPolicyApi, PIN_SHA256, private_file, _python_version
 from test_api_installed_route_readonly import wrap_root_program
@@ -72,18 +72,41 @@ def blocked_receipt(reason, *, policy_verified=False):
         db_grants='NOT_ESTABLISHED', db_data_provenance='NOT_ESTABLISHED',
         db_isolation='NOT_ESTABLISHED', egress_isolation='NOT_ESTABLISHED', sql='NOT_ATTEMPTED',
         database_credentials='NOT_ACCESSED', ssh='NOT_ATTEMPTED', sudo_root_identity=None,
-        os_observation=None, test_disk_identity='NOT_ESTABLISHED', application_execution='NOT_PERFORMED',
+        os_observation=None, policy_failure=None, test_disk_identity='NOT_ESTABLISHED', application_execution='NOT_PERFORMED',
         provider_requests='NOT_PERFORMED', database_writes='NOT_PERFORMED',
         missing_evidence=['INDEPENDENT_CURRENT_TARGET_BASELINE', 'ACTIVE_API_TO_DB_BINDING',
             'DIAGNOSTIC_AND_APPLICATION_PRINCIPAL_BOUNDARIES', 'SYNTHETIC_LOADER_ADMISSION',
             'EGRESS_AND_PRODUCTION_SEPARATION'])
 
 
-def policy_gate(api, env):
+def _policy_failure(error, path):
+    try:
+        if not isinstance(error,Refused) or error.args!=('GITHUB_GET_STATUS_REFUSED',):return None
+        value=getattr(error,'_github_policy_failure',None)
+        if (type(value)is not dict or set(value)!={'endpoint','http_status','rate_category'}
+                or type(value['endpoint'])is not str or value['endpoint']!=GITHUB_POLICY_ENDPOINTS.get(path)
+                or type(value['http_status'])is not str or value['http_status'] not in (*GITHUB_POLICY_STATUSES,'OTHER','UNKNOWN')
+                or type(value['rate_category'])is not str or value['rate_category'] not in ('RATE_REMAINING_ZERO','RETRY_AFTER_HINT','UNDETERMINED')
+                or value['rate_category']!='UNDETERMINED' and value['http_status'] not in ('403','429')):return None
+        return dict(value)
+    except Exception:return None
+
+
+def _policy_get(api, path, progress):
+    # Same fixed-stage pattern as _at_stage; re-raise the original exception
+    # instead of wrapping it and losing this call's private closed context.
+    if progress is not None:progress.policy_failure=None
+    try:return api.get_json(path)
+    except Exception as error:
+        if progress is not None:progress.policy_failure=_policy_failure(error,path)
+        raise
+
+
+def policy_gate(api, env, *, _progress=None):
     context_ready(env)  # Before policy network access and before any credential.
-    repo = api.get_json(GH_REPO)
-    environment = api.get_json(GH_ENV)
-    branches = api.get_json(GH_ENV + '/deployment-branch-policies')
+    repo = _policy_get(api, GH_REPO, _progress)
+    environment = _policy_get(api, GH_ENV, _progress)
+    branches = _policy_get(api, GH_ENV + '/deployment-branch-policies', _progress)
     try:
         policy_ready(repo, environment, branches)  # Existing shared pure guard, unchanged.
         rules = [row for row in environment['protection_rules'] if row.get('type') == 'required_reviewers']
@@ -226,12 +249,13 @@ class _Progress:
     def __init__(self):
         self.policy_verified=False
         self.ssh='NOT_ATTEMPTED'
+        self.policy_failure=None
 
 
 def collect(api, env, *, _progress=None):
     progress=_Progress() if _progress is None else _progress
     deadline=time.monotonic()+OVERALL_SECONDS
-    policy_gate(api,env)  # Existing public policy before any SSH credential access.
+    policy_gate(api,env,_progress=progress)  # Existing public policy before any SSH credential access.
     progress.policy_verified=True
     key,known=env.get('TEST_API_ADMIN_SSH_KEY'),env.get('TEST_API_KNOWN_HOSTS')
     need(type(key) is str and 0<len(key)<=16384 and '\x00' not in key,'TEST_SSH_KEY_NOT_CONFIGURED')
@@ -279,6 +303,7 @@ def main():
     except Exception as error:
         result = blocked_receipt(safe_reason(error), policy_verified=progress.policy_verified)
         result['ssh'] = progress.ssh
+        if safe_reason(error)=='GITHUB_GET_STATUS_REFUSED':result['policy_failure']=progress.policy_failure
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
     result.update(source_sha=source_sha, workflow_run_url=run_url,

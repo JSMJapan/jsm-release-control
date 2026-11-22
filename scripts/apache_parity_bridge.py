@@ -45,6 +45,32 @@ PIN_FIELDS = {'schema', 'control_repository', 'source_repository', 'resource', '
               'deployment_authorized', 'executable_sha256'}
 MAX_JSON = 256 * 1024
 MAX_ARCHIVE = 2 * 1024 * 1024
+GITHUB_POLICY_STATUSES = ('301','302','303','307','308','401','403','404','429','500','502','503','504')
+GITHUB_POLICY_ENDPOINTS = {PUBLIC_REPO_PATH:'REPOSITORY',
+    PUBLIC_REPO_PATH+'/environments/test-api-readonly-access':'ENVIRONMENT',
+    PUBLIC_REPO_PATH+'/environments/test-api-readonly-access/deployment-branch-policies':'BRANCHES'}
+
+
+def _github_policy_context(path, status, response):
+    endpoint = GITHUB_POLICY_ENDPOINTS.get(path)
+    if endpoint is None: return None
+    code = str(status) if type(status) is int and 100<=status<=999 else 'OTHER' if type(status) is int else 'UNKNOWN'
+    code = code if code in GITHUB_POLICY_STATUSES or code == 'UNKNOWN' else 'OTHER'
+    value = dict(endpoint=endpoint, http_status=code, rate_category='UNDETERMINED')
+    if code not in ('403','429'): return value
+    try:
+        signals = []
+        for name in ('X-RateLimit-Remaining','Retry-After'):
+            rows = response.headers.get_all(name, [])
+            if type(rows) is not list or len(rows)>1: return value
+            item = rows[0] if rows else None
+            if rows and (type(item) is not str or len(item)>10 or not re.fullmatch(r'0|[1-9][0-9]{0,9}',item)): return value
+            signals.append(item)
+        if signals[0]=='0': value['rate_category']='RATE_REMAINING_ZERO'
+        elif signals[1] is not None: value['rate_category']='RETRY_AFTER_HINT'
+    except Exception:
+        pass
+    return value
 
 
 def need(condition, code):
@@ -128,7 +154,7 @@ class _GitHubGet:
 
     def get_json(self, path):
         need(type(path) is str and path in self.paths, 'FIXED_GITHUB_GET_SCOPE_REQUIRED')
-        connection = response = None
+        connection = response = status_failure = None
         try:
             connection = http.client.HTTPSConnection('api.github.com', 443, timeout=self.remaining(),
                                                        context=ssl.create_default_context())
@@ -142,7 +168,11 @@ class _GitHubGet:
             need(body_socket is not None, 'GITHUB_SOCKET_REQUIRED')
             body_socket.settimeout(self.remaining())
             response = connection.getresponse()
-            need(response.status == 200, 'GITHUB_GET_STATUS_REFUSED')  # Redirects are never followed.
+            status = response.status
+            if status != 200:  # Same refusal; redirects are never followed.
+                status_failure = Refused('GITHUB_GET_STATUS_REFUSED')
+                status_failure._github_policy_failure = _github_policy_context(path, status, response)
+                raise status_failure
             need((response.getheader('Content-Type') or '').split(';')[0].strip().lower() == 'application/json',
                  'GITHUB_JSON_CONTENT_TYPE_REQUIRED')
             need((response.getheader('Content-Encoding') or 'identity').lower() == 'identity',
@@ -170,8 +200,14 @@ class _GitHubGet:
         except Exception:
             raise Refused('GITHUB_TRANSPORT_OR_SCHEMA_REFUSED') from None
         finally:
-            if response is not None: response.close()
-            if connection is not None: connection.close()
+            try:
+                if response is not None: response.close()
+                if connection is not None: connection.close()
+            except BaseException as error:
+                if status_failure is not None: status_failure._github_policy_failure = None
+                try: error._github_policy_failure = None
+                except Exception: pass
+                raise
 
 
 class PublicPolicyApi(_GitHubGet):

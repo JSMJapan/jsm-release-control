@@ -1,3 +1,41 @@
+# 22.11.2026 — closed context for the same public GitHub policy refusal
+
+**SOURCE CANDIDATE / RUNTIME NOT_RUN.**
+[Plan7072593644](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7072593644),
+[owner CODE READY7073699513](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7073699513),
+base `f5f57cca7044fa49cda3356bea475fcc3852e0e4`.
+
+Actual [run44973484732](https://github.com/JSMJapan/jsm-release-control/actions/runs/44973484732)
+at01:53:29UTC returned GITHUB_GET_STATUS_REFUSED before policy success/SSH/TEST.
+Historical endpoint/status/cause remain UNKNOWN; init512 was not reached.
+No rate-limit, outage or changed policy is inferred. The isolated later Mac
+public attempt had a transport refusal without response; it is separate evidence.
+
+The same getter attaches only private closed context to that specific non200
+Refused instance for the three fixed TEST policy paths. Type/args/reason and
+cleanup order remain; a cleanup replacement invalidates status evidence. Other
+consumers retain their former public behavior. No raw response/body/header/URL,
+count, timing/reset/remaining value, request ID or exception text is retained
+in evidence. Header parsing uses existing HTTPResponse metadata, no new request.
+
+Only the TEST-DB receipt adds policy_failure: REPOSITORY/ENVIRONMENT/BRANCHES,
+fixed status strings301/302/303/307/308/401/403/404/429/500/502/503/504 plus
+OTHER/UNKNOWN, and RATE_REMAINING_ZERO/RETRY_AFTER_HINT/UNDETERMINED. Hints apply
+only to403/429 with unique bounded canonical decimal headers; any malformed,
+duplicate or oversized selected header leaves UNDETERMINED. Remaining0 is an
+observed signal, not proof of cause; Retry-After does not prove secondary limits.
+Transport/schema/private/multiarg failures, success200 and later SSH failures
+have policy_failure=null. Per-call progress and endpoint checks prevent stale
+context; the local _at_stage pattern re-raises the original exception unchanged.
+
+Same three GETs/order/allowlist, no auth, no redirect/retry, same budgets,
+policy/environment/SSH guards, init512/default128 and remote capsule. No new
+policy-only workflow, endpoint, permission or secret. Only the existing automatic
+CI filters add the cohesive new test module. Regression uses real HTTPResponse
+over synthetic bytes through getter→policy_gate→main, with request/cleanup/privacy
+and legacy consumer parity. Final full tests/CI and two non-author exact-head
+reviews belong in the PR; merge/manual runtime still require separate approval.
+
 # 22.11.2026 — fixed init-binding PID1 profile512, default128 preserved
 
 **SOURCE CANDIDATE / RUNTIME NOT_RUN / DB ADMISSION BLOCKED.**

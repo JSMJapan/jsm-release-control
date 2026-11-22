@@ -222,7 +222,7 @@ class ScopePolicyTests(unittest.TestCase):
             'application_db_principal', 'db_grants', 'db_data_provenance', 'db_isolation',
             'egress_isolation', 'sql', 'database_credentials', 'ssh', 'application_execution',
             'provider_requests', 'database_writes', 'missing_evidence', 'os_observation',
-            'sudo_root_identity', 'test_disk_identity'}
+            'sudo_root_identity', 'test_disk_identity', 'policy_failure'}
         self.assertEqual(set(value), expected)
         self.assertIsNone(value['admitted_baseline'])
         self.assertLessEqual(len(json.dumps(value).encode('ascii')), 2048)
