@@ -1,5 +1,4 @@
 """Actual public getter/parser to DB receipt, entirely synthetic HTTP bytes."""
-import copy
 import http.client
 import io
 import json
@@ -19,7 +18,7 @@ class PolicyFailureTests(unittest.TestCase):
         api,_=core.api();self.paths=[self.m.GH_REPO,self.m.GH_ENV,self.m.GH_ENV+'/deployment-branch-policies']
         self.rows=[api.get_json(path) for path in self.paths]
 
-    def wire(self,index=0,status=403,headers=(),cleanup=None):
+    def wire(self,index=0,status=403,headers=(),cleanup=None,status_override=...,header_override=...,request_failure_at=None):
         calls=[];closed=[];responses=[];connections=[];outer=self
         class Socket:
             def __init__(inner,data):inner.data=data
@@ -32,6 +31,8 @@ class PolicyFailureTests(unittest.TestCase):
             def request(inner,method,path,body,headers):
                 outer.assertEqual(method,'GET');outer.assertIsNone(body)
                 outer.assertNotIn('Authorization',headers);outer.assertNotIn('Cookie',headers)
+                if inner.number==request_failure_at:
+                    calls.append(path);raise OSError('PRIVATE_TRANSPORT')
                 calls.append(path);outer.assertEqual(path,outer.paths[inner.number%3])
                 bad=inner.number==index;code=status if bad else 200
                 payload=b'PRIVATE_BODY_COOKIE' if bad and code!=200 else json.dumps(outer.rows[inner.number%3]).encode()
@@ -41,6 +42,8 @@ class PolicyFailureTests(unittest.TestCase):
                 inner.sock=Socket(raw)
             def getresponse(inner):
                 response=http.client.HTTPResponse(inner.sock,method='GET');response.begin();responses.append(response)
+                if status_override is not ...:response.status=status_override
+                if header_override is not ...:response.headers=header_override
                 original=response.close;once=[False]
                 def close():
                     closed.append(('response',inner.number));original()
@@ -144,6 +147,68 @@ class PolicyFailureTests(unittest.TestCase):
             self.assertIs(type(caught.exception),access._ProbeFailure if staged else self.m.Refused)
             if staged:self.assertEqual(caught.exception.failure_stage,'policy_repository')
             self.assertEqual(calls,self.paths[:1]);self.assertEqual(closed,[('response',0),('connection',0)])
+
+    def test_unusual_status_and_malformed_header_containers_stay_closed(self):
+        for status,expected in [(None,'UNKNOWN'),(True,'UNKNOWN'),('PRIVATE','UNKNOWN'),
+                (403.0,'UNKNOWN'),(999,'OTHER'),(10**5000,'OTHER')]:
+            with self.subTest(status_type=type(status).__name__):
+                factory,_,_,_=self.wire(status_override=status)
+                value=self.run_main(factory)
+                self.assertEqual(value['reason'],'GITHUB_GET_STATUS_REFUSED')
+                self.assertEqual(value.get('policy_failure'),dict(endpoint='REPOSITORY',http_status=expected,rate_category='UNDETERMINED'))
+        class Headers:
+            def __init__(inner,value):inner.value=value
+            def get_all(inner,name,default):
+                if isinstance(inner.value,Exception):raise inner.value
+                return inner.value if name=='X-RateLimit-Remaining' else ['5']
+        for rows in (None,('0',),'0',[None],[0],[True],['0','0'],[b'0'],[{}],RuntimeError('PRIVATE')):
+            with self.subTest(rows_type=type(rows).__name__):
+                factory,_,_,_=self.wire(header_override=Headers(rows))
+                value=self.run_main(factory)
+                self.assertEqual(value.get('policy_failure'),dict(endpoint='REPOSITORY',http_status='403',rate_category='UNDETERMINED'))
+
+    def test_private_multiarg_cross_endpoint_and_forged_context_are_not_projected(self):
+        good=dict(endpoint='REPOSITORY',http_status='403',rate_category='RATE_REMAINING_ZERO')
+        bad=[None,[],dict(good,raw_url='PRIVATE'),dict(good,endpoint='ENVIRONMENT'),
+            dict(good,endpoint=['REPOSITORY']),dict(good,http_status=403),dict(good,http_status=True),
+            dict(good,http_status='PRIVATE'),dict(good,rate_category='PRIVATE'),
+            dict(good,http_status='500'),dict(good,http_status='UNKNOWN'),dict(good,rate_category=['UNDETERMINED'])]
+        for context in bad:
+            error=self.m.Refused('GITHUB_GET_STATUS_REFUSED');error._github_policy_failure=context
+            class Api:
+                def get_json(inner,path):raise error
+            factory,_,_,_=self.wire();value=self.run_main(factory,api=Api())
+            self.assertIn('policy_failure',value);self.assertIsNone(value['policy_failure'])
+        for error in (RuntimeError('GITHUB_GET_STATUS_REFUSED'),self.m.Refused('PRIVATE')):
+            error._github_policy_failure=good
+            factory,_,_,_=self.wire();value=self.run_main(factory,api=Api())
+            self.assertIsNone(value['policy_failure'])
+        error=self.m.Refused('PRIVATE');error.args=('GITHUB_GET_STATUS_REFUSED','PRIVATE');error._github_policy_failure=good
+        factory,_,_,_=self.wire();self.assertIsNone(self.run_main(factory,api=Api())['policy_failure'])
+
+    def test_reused_api_and_new_main_progress_do_not_retain_old_failure(self):
+        api=self.m.TestPolicyApi();deadline=api.deadline
+        factory,calls,_,_=self.wire(request_failure_at=1)
+        first=self.run_main(factory,api=api);second=self.run_main(factory,api=api)
+        self.assertIn('policy_failure',first)
+        self.assertEqual(first['policy_failure']['endpoint'],'REPOSITORY')
+        self.assertEqual(second['reason'],'GITHUB_TRANSPORT_OR_SCHEMA_REFUSED');self.assertIsNone(second['policy_failure'])
+        self.assertEqual(calls,[self.paths[0],self.paths[0]]);self.assertEqual(api.deadline,deadline)
+        factory,calls,_,_=self.wire(index=-1)
+        third=self.run_main(factory,api=api);self.assertIsNone(third['policy_failure'])
+        self.assertEqual(calls,self.paths);self.assertEqual(api.deadline,deadline)
+
+    def test_cleanup_exception_identity_args_and_stop_order_are_unchanged(self):
+        import test_api_readonly_access as access
+        for where in ('response','connection'):
+            for error in (RuntimeError('PRIVATE','SECOND'),self.m.Refused('GITHUB_GET_STATUS_REFUSED')):
+                error._github_policy_failure=dict(endpoint='REPOSITORY',http_status='403',rate_category='RATE_REMAINING_ZERO')
+                arguments=error.args;factory,_,closed,_=self.wire(cleanup=(where,error))
+                with patch.object(http.client,'HTTPSConnection',factory):
+                    with self.assertRaises(type(error)) as caught:access.TestPolicyApi().get_json(self.paths[0])
+                self.assertIs(caught.exception,error);self.assertEqual(error.args,arguments)
+                self.assertIsNone(error._github_policy_failure)
+                self.assertEqual(closed,[('response',0)] if where=='response' else [('response',0),('connection',0)])
 
 
 if __name__=='__main__':unittest.main()

@@ -54,7 +54,7 @@ GITHUB_POLICY_ENDPOINTS = {PUBLIC_REPO_PATH:'REPOSITORY',
 def _github_policy_context(path, status, response):
     endpoint = GITHUB_POLICY_ENDPOINTS.get(path)
     if endpoint is None: return None
-    code = str(status) if type(status) is int else 'UNKNOWN'
+    code = str(status) if type(status) is int and 100<=status<=999 else 'OTHER' if type(status) is int else 'UNKNOWN'
     code = code if code in GITHUB_POLICY_STATUSES or code == 'UNKNOWN' else 'OTHER'
     value = dict(endpoint=endpoint, http_status=code, rate_category='UNDETERMINED')
     if code not in ('403','429'): return value
