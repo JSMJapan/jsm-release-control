@@ -434,19 +434,21 @@ class OsMetadataTests(unittest.TestCase):
             parent=root/'parent';parent.symlink_to(directory,target_is_directory=True)
             with self.assertRaises(OSError):self.ns['_proc_read'](str(parent/'file'),time.monotonic()+1)
 
-    def test_proc_read_accepts_only_own_unix_lookup_ctime_refresh_and_keeps_identity_guards(self):
+    def test_proc_read_accepts_only_exact_own_net_lookup_ctime_refresh_and_keeps_identity_guards(self):
         own='/proc/'+str(os.getpid())
         initial=dict(st_dev=9,st_ino=700,st_mode=stat.S_IFREG|0o444,
             st_uid=0,st_gid=0,st_nlink=1,st_ctime_ns=100)
         changes=dict(st_dev=10,st_ino=701,st_mode=stat.S_IFREG|0o400,
             st_uid=1,st_gid=1,st_nlink=2,st_ctime_ns=101)
-        cases=[(own+'/net/unix',None,'st_ctime_ns',True)]
-        cases += [(own+'/net/unix',key,None,False) for key in changes]
-        cases += [(own+'/net/unix',None,key,False) for key in changes if key!='st_ctime_ns']
+        accepted_paths=[own+'/net/'+name for name in ('unix','tcp','tcp6')]
+        cases=[(path,None,'st_ctime_ns',True) for path in accepted_paths]
+        cases += [(path,key,None,False) for path in accepted_paths for key in changes]
+        cases += [(path,None,key,False) for path in accepted_paths for key in changes if key!='st_ctime_ns']
         cases += [(path,None,'st_ctime_ns',False) for path in (
             own+'/stat',own+'/mountinfo','/proc/'+str(os.getpid()+1)+'/net/unix',
             '/proc/self/net/unix',own+'/net/unix/extra',own+'/net//unix',
-            own+'/net/./unix',own+'/net/../net/unix')]
+            own+'/net/./unix',own+'/net/../net/unix',own+'/net/udp',own+'/net/tcp_extra',
+            '/proc/'+str(os.getpid()+1)+'/net/tcp', '/proc/self/net/tcp6')]
         for path,fd_change,path_change,accepted in cases:
             with self.subTest(fd_change=fd_change,path_change=path_change,accepted=accepted):
                 after=dict(initial);final=dict(initial)
@@ -497,34 +499,35 @@ class OsMetadataTests(unittest.TestCase):
                 self.assertEqual(closed,[41,40] if case=='open' else [42,41,40])
 
     @unittest.skipUnless(sys.platform=='linux','Native Linux proc-net lookup timestamps only')
-    def test_native_own_unix_reader_survives_real_lookup_timestamp_refresh(self):
-        # Real kernel metadata/content stay private. Only final stat is delayed;
-        # no metadata is fabricated, no daemon/socket/namespace is created.
+    def test_native_own_net_tables_survive_real_lookup_timestamp_refresh(self):
+        # Real kernel metadata/content stay private. Only final stat is delayed.
         original_stat,original_fstat=os.stat,os.fstat
-        held=[];lookups=[];outcome=None;valid=False
-        def fstat(fd):
-            value=original_fstat(fd);held.append(self.ns['_stamp'](value));return value
-        def separated_stat(path,*,dir_fd=None,follow_symlinks=True):
-            if path=='unix' and type(dir_fd)is int and follow_symlinks is False:
-                time.sleep(.05)  # Cross kernel timestamp ticks before fresh lookup.
-                value=original_stat(path,dir_fd=dir_fd,follow_symlinks=False)
-                lookups.append(self.ns['_stamp'](value));return value
-            return original_stat(path,dir_fd=dir_fd,follow_symlinks=follow_symlinks)
-        with patch.object(self.ns['os'],'stat',side_effect=separated_stat), \
-                patch.object(self.ns['os'],'fstat',side_effect=fstat):
-            try:
-                text=self.ns['_proc_read']('/proc/'+str(os.getpid())+'/net/unix',time.monotonic()+.75)
-                valid=type(text)is str and len(text.encode('utf-8'))<=65536 and text.startswith('Num')
-            except self.ns['MetadataRefused'] as error:
-                outcome=error.code
-            except Exception:
-                outcome='UNEXPECTED_NATIVE_READER_FAILURE'
-        self.assertTrue(len(held)==2 and len(lookups)==1,'NATIVE_STAT_COUNTS')
-        self.assertTrue(held[0]==held[1],'NATIVE_HELD_FD_CHANGED')
-        self.assertTrue(held[0][:-1]==lookups[0][:-1],'NATIVE_LOOKUP_IDENTITY_CHANGED')
-        self.assertTrue(held[0][-1]!=lookups[0][-1],'NATIVE_LOOKUP_CLOCK_TICK_NOT_OBSERVED')
-        self.assertIsNone(outcome,'Native bounded reader refused; closed reason only')
-        self.assertTrue(valid,'NATIVE_BOUNDED_HEADER_REQUIRED')
+        for table,first_column in (('unix','Num'),('tcp','sl'),('tcp6','sl')):
+            with self.subTest(table=table):
+                held=[];lookups=[];outcome=None;valid=False
+                def fstat(fd):
+                    value=original_fstat(fd);held.append(self.ns['_stamp'](value));return value
+                def separated_stat(path,*,dir_fd=None,follow_symlinks=True):
+                    if path==table and type(dir_fd)is int and follow_symlinks is False:
+                        time.sleep(.05)  # Cross kernel timestamp ticks before fresh lookup.
+                        value=original_stat(path,dir_fd=dir_fd,follow_symlinks=False)
+                        lookups.append(self.ns['_stamp'](value));return value
+                    return original_stat(path,dir_fd=dir_fd,follow_symlinks=follow_symlinks)
+                with patch.object(self.ns['os'],'stat',side_effect=separated_stat), \
+                        patch.object(self.ns['os'],'fstat',side_effect=fstat):
+                    try:
+                        text=self.ns['_proc_read']('/proc/'+str(os.getpid())+'/net/'+table,time.monotonic()+.75)
+                        valid=type(text)is str and len(text.encode('utf-8'))<=65536 and text.split(None,1)[0]==first_column
+                    except self.ns['MetadataRefused'] as error:
+                        outcome=error.code
+                    except Exception:
+                        outcome='UNEXPECTED_NATIVE_READER_FAILURE'
+                self.assertTrue(len(held)==2 and len(lookups)==1,'NATIVE_STAT_COUNTS')
+                self.assertTrue(held[0]==held[1],'NATIVE_HELD_FD_CHANGED')
+                self.assertTrue(held[0][:-1]==lookups[0][:-1],'NATIVE_LOOKUP_IDENTITY_CHANGED')
+                self.assertTrue(held[0][-1]!=lookups[0][-1],'NATIVE_LOOKUP_CLOCK_TICK_NOT_OBSERVED')
+                self.assertIsNone(outcome,'Native bounded reader refused; closed reason only')
+                self.assertTrue(valid,'NATIVE_BOUNDED_HEADER_REQUIRED')
 
     def test_actual_metadata_directory_symlink_is_unknown_without_listing_or_contents(self):
         with tempfile.TemporaryDirectory(prefix='jsm-2760-offline-',dir=FIXTURE_TMP) as folder:

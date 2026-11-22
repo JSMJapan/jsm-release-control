@@ -275,7 +275,7 @@ class TransportTests(unittest.TestCase):
         for key in ('db_target_identity','db_data_provenance','db_isolation','effective_api_binding'):
             self.assertEqual(result[key],'NOT_ESTABLISHED')
 
-    def test_actual_child_dispatch_requests_v5_details_without_executing_any_os_probe(self):
+    def test_actual_child_dispatch_requests_v6_details_without_executing_any_os_probe(self):
         nonce='b'*32;captured=[]
         def wrapper(value,child):
             self.assertEqual(value,nonce);captured.append(child);return child.encode('ascii')
@@ -283,11 +283,11 @@ class TransportTests(unittest.TestCase):
         before,footer=captured[0].rsplit('\nprint(',1)
         namespace={};exec(compile(before,'<actual-observer-definitions>','exec'),namespace)
         seen=[]
-        def observe(value,details=False,discovery=False,binding=False):
-            seen.append((value,details,discovery,binding));return dict(sql='NOT_ATTEMPTED')
+        def observe(value,details=False,discovery=False,binding=False,php_endpoint=False):
+            seen.append((value,details,discovery,binding,php_endpoint));return dict(sql='NOT_ATTEMPTED')
         namespace['_observe']=observe;out=io.StringIO()
         with patch('sys.stdout',out):exec(compile('print('+footer,'<actual-dispatch>','exec'),namespace)
-        self.assertEqual(seen,[(nonce,True,True,True)])
+        self.assertEqual(seen,[(nonce,True,True,True,True)])
         self.assertEqual(json.loads(out.getvalue()),dict(sql='NOT_ATTEMPTED'))
 
     def test_v2_projection_rejects_forged_stage_fields_axes_units_or_completion(self):

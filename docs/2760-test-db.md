@@ -1,3 +1,45 @@
+# 22.11.2026 — one passive FPM loopback socket witness in TEST
+
+**SOURCE CANDIDATE / TEST RUNTIME NOT_RUN / DB ADMISSION BLOCKED.**
+[Approved scope](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7073968658).
+Control base `38f394a94d848719b526525f231735a501e07036`. Destination is
+Google Cloud TEST jsm-sandbox, project dark-berm-508215-d2, develop.jsmjapan.com.
+[Actual run45031411532](https://github.com/JSMJapan/jsm-release-control/actions/runs/45031411532)
+accepted the Docker summary with a MySQL-family container advertising a loopback
+publication for **container-side** TCP port 3306. The host port and PHP
+association were unproved, and Apache/PHP mount namespace checks did not pass.
+
+In the existing protected workflow, v6 finishes all v5 observations unchanged.
+Only then, within the same absolute three-second child deadline, it attempts to
+observe one stable established TCP socket on a child of the fixed php7.4-fpm
+systemd MainPID. Both bounded samples require the pinned executable, the exact
+parent, process starts, equal PID/mount/network namespaces and matching root
+directory device/inode. The observer shares the FPM network namespace. Master
+and worker must hold the same unique listening inode recorded for the fixed
+FPM socket name. The candidate FD must be present in the namespace TCP tables
+and carry a stable socket inode and local/peer tuple, with both IPs loopback and
+peer port 3306. A final fixed unit read must still agree with the original unit
+snapshots. A missing, ambiguous, refused, changed or late observation is UNKNOWN.
+
+This is a transport witness for one process and socket. Kernel metadata here
+does not distinguish client/server direction, name the worker pool, bind an
+Apache request to that worker, identify a proxy/DNAT's downstream leg, or
+identify a MySQL listener/container or schema. Those facts stay UNKNOWN.
+The earlier accepted Docker summary remains independent and cannot promote
+this witness into API/DB admission, DB provenance or TEST isolation. SQL stays
+NOT_ATTEMPTED. No HTTP request to the app, new connection, traffic capture,
+Docker inspect, environment, command line, app configuration or credential read
+is added. Intermediate PIDs, paths, namespace IDs and tuples remain private.
+
+The existing 128-descriptor per-process cap also applies to these scans, with
+a fixed maximum of 16 immediate children in the new sample. TCP and TCP6 reads
+retain the existing 64 KiB per-table cap. Exact self proc-net lookup rules
+permit the known Linux re-instantiated pathname ctime for only unix/tcp/tcp6.
+Held FD identity, all other pathname fields, no-follow guards, 0.75-second
+Docker window, 3/4/5-second child/root/outer limits, fixed transport and
+environment gates remain. No manual TEST run is authorized by the source PR.
+The rollback is a reviewed source revert.
+
 # 22.11.2026 — v5 Docker transaction immediately before both service end snapshots
 
 **SOURCE CANDIDATE / RUNTIME NOT_RUN / DB ADMISSION BLOCKED.**
