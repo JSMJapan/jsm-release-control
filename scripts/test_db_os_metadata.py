@@ -372,9 +372,9 @@ def _observe(nonce,details=False,discovery=False,binding=False):
         privacy=run('privacy_begin',lambda:_privacy_snapshot(deadline))
         if privacy is not None and any(v is None for row in privacy.values() for v in row.values()):
             unconfirmed('privacy_begin','UNKNOWN_PROPERTY_VALUE')
-    if discovery:
+    if discovery and not binding:
         unit=additional.get('docker') if additional is not None else None
-        docker_pending=_docker_begin(unit,deadline,binding=True) if binding else _docker_begin(unit,deadline)
+        docker_pending=_docker_begin(unit,deadline)
     for role,row in zip(ROLES,result['processes']):
         name=role+'_process_begin'
         if first is None:skip(name,'DEPENDENCY_UNAVAILABLE');continue
@@ -402,10 +402,14 @@ def _observe(nonce,details=False,discovery=False,binding=False):
             if mount is not None:result['datadir'].update({k:mount[k] for k in ('state','filesystem','device_matches')})
         else:skip('mount_begin','DEPENDENCY_UNAVAILABLE')
     else:skip('mount_begin','DEPENDENCY_UNAVAILABLE')
+    if binding:
+        unit=additional.get('docker') if additional is not None else None
+        docker_pending=_docker_begin(unit,deadline,binding=True)
     last=run('units_end',lambda:_unit_snapshot(deadline))
     if first is not None and last is not None and first!=last:unconfirmed('units_end','INCONSISTENT')
     if details:
         additional_end=run('additional_units_end',lambda:_additional_unit_snapshot(deadline))
+        if binding:result['docker_discovery']=_docker_finish(docker_pending,additional_end.get('docker') if additional_end is not None else None,deadline)
         privacy_end=run('privacy_end',lambda:_privacy_snapshot(deadline))
         if privacy_end is not None and any(v is None for row in privacy_end.values() for v in row.values()):
             unconfirmed('privacy_end','UNKNOWN_PROPERTY_VALUE')
@@ -425,7 +429,7 @@ def _observe(nonce,details=False,discovery=False,binding=False):
                     and all(type(v)is bool for v in privacy_end[role].values())):
                 row['stable']=privacy[role]==privacy_end[role]
                 if not row['stable']:unconfirmed('privacy_end','INCONSISTENT')
-    if discovery:result['docker_discovery']=_docker_finish(docker_pending,additional_end.get('docker') if additional_end is not None else None,deadline)
+    if discovery and not binding:result['docker_discovery']=_docker_finish(docker_pending,additional_end.get('docker') if additional_end is not None else None,deadline)
     if binding:result['docker_binding']=_binding_public(docker_pending,result['docker_discovery'])
     last_unix=run('unix_end',lambda:_unix_snapshot_detailed(deadline) if details else _unix_snapshot(deadline))
     for role,row in zip(ROLES,result['processes']):

@@ -1,3 +1,46 @@
+# 22.11.2026 — v5 Docker transaction immediately before both service end snapshots
+
+**SOURCE CANDIDATE / RUNTIME NOT_RUN / DB ADMISSION BLOCKED.**
+[Approved plan7073968658](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7073968658),
+[owner CODE READY7074071208](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7074071208),
+base `f588e9e09d35aa009950691a41f5a4d88e0f1535`.
+Destination remains Google Cloud TEST jsm-sandbox, project dark-berm-508215-d2,
+`develop.jsmjapan.com`; this source preparation makes no TEST or production call.
+
+Actual [run44982864745](https://github.com/JSMJapan/jsm-release-control/actions/runs/44982864745)
+at03:58:04UTC established initial SYSTEMD/PID1 proof, then attempted=true with
+PEER_REFUSED/binding DEADLINE and after_stable=null. Exact postproof substage,
+elapsed time and earlier GET/parse result remain UNKNOWN. Empty containers are
+discarded evidence, not proof of absence. SQL remained NOT_ATTEMPTED.
+
+The actual unchanged observer reproduces that shape with a synthetic0.6s legacy
+PHP-socket read plus0.2s postproof query. This proves source scheduling coupling;
+it does not establish the elapsed time or cause of the actual TEST refusal.
+Only v5 now runs Docker begin after legacy begin reads, immediately before the
+existing units_end, then existing additional_units_end, Docker finish and
+privacy_end. Early main/additional/privacy snapshots remain. Both main-service
+and Docker snapshots still bracket GET, including an old live Apache/PHP process
+whose systemd MainPID changes during GET. Stability flags finish before output.
+
+The same single connect/peer/GET, full before/after scans, absolute0.75s from late
+begin, global child3s/root4s/outer5s, init512/default128, paths, properties, closed
+schema, HTTP/SQL barriers, auth and policy/transport guards remain. No retry,
+skip, fresh deadline, increased budget or permission. Exhausted global time
+before late begin means no connect/GET; begin at2.9s remains capped at3.0s.
+Postproof drift/timeout discards rows; a prior HTTP/schema refusal is not healed.
+v2/v3/v4 keep their former ordered I/O/output/error/cleanup behavior. Existing
+capsules/helpers are reused; only observer placement changes. The automatic CI
+path filters include the cohesive new regression module; jobs and operational
+workflows are unchanged.
+
+Regression invokes actual _observe with synthetic clock/socket/proc fixtures,
+OLD RED/NEW GREEN, main/Docker MainPID drift, initial refusal, postproof drift,
+global/deadline clamps, schema refusal, baseline legacy ordered behavioral
+receipts and successful v5 read multiset. No host daemon is contacted. Final
+full counts/CI and two non-author frozen-head reviews belong in the PR. Runtime
+sufficiency remains UNKNOWN. Merge and any new runtime need separate owner
+approval; rollback is reviewed source revert, not a server/DB operation.
+
 # 22.11.2026 — closed context for the same public GitHub policy refusal
 
 **SOURCE CANDIDATE / RUNTIME NOT_RUN.**
