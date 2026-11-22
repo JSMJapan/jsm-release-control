@@ -77,8 +77,9 @@ def _proc_read(path,deadline,limit=65536):
         pathname=_stamp(os.stat(name,dir_fd=fds[-1],follow_symlinks=False))
         own=os.getpid()
         # A fresh proc-net lookup re-instantiates timestamps, not the held FD.
-        own_unix=_pid_ready(own) and path=='/proc/'+str(own)+'/net/unix'
-        if (held[:-1]!=pathname[:-1] if own_unix else held!=pathname):raise MetadataRefused('CHANGED_DURING_READ')
+        parent,leaf=path.rsplit('/',1)
+        own_net=_pid_ready(own) and parent=='/proc/'+str(own)+'/net' and leaf in ('unix','tcp','tcp6')
+        if (held[:-1]!=pathname[:-1] if own_net else held!=pathname):raise MetadataRefused('CHANGED_DURING_READ')
         return data.decode('utf-8')
     finally:
         if fd is not None:os.close(fd)
@@ -319,13 +320,14 @@ def _mount_snapshot(device,deadline):
     result=_parse_mount(text,device)
     result['_identity']=hashlib.sha256(text.encode('utf-8')).hexdigest()
     return result
-def _observe(nonce,details=False,discovery=False,binding=False):
+def _observe(nonce,details=False,discovery=False,binding=False,php_endpoint=False):
     if type(nonce)is not str or not re.fullmatch('[0-9a-f]{32}',nonce):raise ValueError()
     if type(details)is not bool:raise ValueError()
     if type(discovery)is not bool or discovery and not details:raise ValueError()
     if type(binding)is not bool or binding and not discovery:raise ValueError()
+    if type(php_endpoint)is not bool or php_endpoint and not binding:raise ValueError()
     deadline=time.monotonic()+3
-    result=dict(version='jsm-test-db-os-2760-v5' if binding else 'jsm-test-db-os-2760-v4' if discovery else 'jsm-test-db-os-2760-v3' if details else 'jsm-test-db-os-2760-v2',nonce=nonce,euid=os_geteuid(),observation_state='PARTIAL',
+    result=dict(version='jsm-test-db-os-2760-v6' if php_endpoint else 'jsm-test-db-os-2760-v5' if binding else 'jsm-test-db-os-2760-v4' if discovery else 'jsm-test-db-os-2760-v3' if details else 'jsm-test-db-os-2760-v2',nonce=nonce,euid=os_geteuid(),observation_state='PARTIAL',
         processes=[dict(id=r,state='unknown',exe_matches=None,namespace_matches=None,stable=None,
             net_namespace_matches=None,mount_namespace_matches=None,
             load_state=None,active_state=None,pid_available=None) for r in ROLES],
@@ -338,6 +340,7 @@ def _observe(nonce,details=False,discovery=False,binding=False):
         result['namespace_settings']=[dict(id=r,private_tmp=None,private_mounts=None,private_network=None,stable=None) for r in ('apache','php')]
     if discovery:result['docker_discovery']=_docker_packet()
     if binding:result['docker_binding']=_binding_new()['public']
+    if php_endpoint:result['php_endpoint']=_php_endpoint_receipt('UNIT_UNAVAILABLE')
     if result['euid']!=0:return result
     stages={r['id']:r for r in result['stages']}
     def skip(name,error):stages[name]['error']=error
@@ -481,5 +484,7 @@ def _observe(nonce,details=False,discovery=False,binding=False):
             or not all(stage['completed'] for stage in result['stages'])):
         result['observation_state']='PARTIAL'
     if discovery and result['docker_discovery']['state']!='OBSERVED':result['observation_state']='PARTIAL'
+    if php_endpoint and (observed.get('php') or {}).get('exe_matches') is True and observed['php']['net_namespace_matches'] is True:
+        result['php_endpoint']=_observe_php_endpoint(first,last,deadline)
     return result
 '''

@@ -25,6 +25,7 @@ from test_api_installed_route_readonly import wrap_root_program
 from test_db_os_metadata import LIBRARY, STAGE_IDS, STAGE_ERRORS, DETAIL_STAGE_IDS, DETAIL_STAGE_ERRORS
 from test_db_docker_metadata import LIBRARY as DOCKER_LIBRARY, project_discovery
 from test_db_docker_binding import LIBRARY as BINDING_LIBRARY, project_binding
+from test_db_php_endpoint import LIBRARY as PHP_ENDPOINT_LIBRARY, project_php_endpoint
 
 REPO = 'JSMJapan/jsm-release-control'
 GH_REPO = '/repos/' + REPO
@@ -129,7 +130,7 @@ def need(value, reason):
 
 def remote_program(nonce):
     need(type(nonce) is str and re.fullmatch('[0-9a-f]{32}',nonce), 'NONCE_REQUIRED')
-    child=LIBRARY+DOCKER_LIBRARY+BINDING_LIBRARY+'\nprint(json.dumps(_observe('+repr(nonce)+',details=True,discovery=True,binding=True),separators=(",",":"),sort_keys=True))\n'
+    child=LIBRARY+DOCKER_LIBRARY+BINDING_LIBRARY+PHP_ENDPOINT_LIBRARY+'\nprint(json.dumps(_observe('+repr(nonce)+',details=True,discovery=True,binding=True,php_endpoint=True),separators=(",",":"),sort_keys=True))\n'
     return wrap_root_program(nonce,child)
 
 
@@ -138,18 +139,21 @@ def _child_projection(child, nonce):
     # not forwarded, even if the remote capsule malfunctions.
     fields={'version','nonce','euid','observation_state','processes','sockets','datadir','stages',
         'effective_api_binding','test_disk_identity','db_proof','sql'}
-    detailed=type(child)is dict and child.get('version') in ('jsm-test-db-os-2760-v3','jsm-test-db-os-2760-v4','jsm-test-db-os-2760-v5')
-    discovery=type(child)is dict and child.get('version') in ('jsm-test-db-os-2760-v4','jsm-test-db-os-2760-v5')
-    binding=type(child)is dict and child.get('version')=='jsm-test-db-os-2760-v5'
+    php_endpoint=type(child)is dict and child.get('version')=='jsm-test-db-os-2760-v6'
+    detailed=type(child)is dict and child.get('version') in ('jsm-test-db-os-2760-v3','jsm-test-db-os-2760-v4','jsm-test-db-os-2760-v5','jsm-test-db-os-2760-v6')
+    discovery=type(child)is dict and child.get('version') in ('jsm-test-db-os-2760-v4','jsm-test-db-os-2760-v5','jsm-test-db-os-2760-v6')
+    binding=type(child)is dict and child.get('version') in ('jsm-test-db-os-2760-v5','jsm-test-db-os-2760-v6')
     if detailed:fields|={'additional_services','namespace_settings'}
     if discovery:fields.add('docker_discovery')
     if binding:fields.add('docker_binding')
-    if (type(child) is not dict or set(child)!=fields or child['version'] not in ('jsm-test-db-os-2760-v2','jsm-test-db-os-2760-v3','jsm-test-db-os-2760-v4','jsm-test-db-os-2760-v5')
+    if php_endpoint:fields.add('php_endpoint')
+    if (type(child) is not dict or set(child)!=fields or child['version'] not in ('jsm-test-db-os-2760-v2','jsm-test-db-os-2760-v3','jsm-test-db-os-2760-v4','jsm-test-db-os-2760-v5','jsm-test-db-os-2760-v6')
             or child['nonce']!=nonce or type(child['euid']) is not int or child['euid']!=0
             or child['observation_state'] not in ('PARTIAL','OBSERVED')
             or child['effective_api_binding']!='NOT_ESTABLISHED' or child['test_disk_identity']!='NOT_ESTABLISHED'
             or child['db_proof']!='BLOCKED_TARGET_ADMISSION' or child['sql']!='NOT_ATTEMPTED'):
         return None
+    if php_endpoint and project_php_endpoint(child['php_endpoint']) is None:return None
     if discovery and project_discovery(child['docker_discovery']) is None:return None
     if binding and project_binding(child['docker_binding'],child['docker_discovery']) is None:return None
     if detailed:
@@ -208,6 +212,12 @@ def _child_projection(child, nonce):
         if row['attempted'] and row['error'] in ('NOT_ATTEMPTED','UNIT_UNAVAILABLE','PID_UNAVAILABLE'):return None
         if row['attempted'] is False and row['error'] not in (
                 'NOT_ATTEMPTED','DEPENDENCY_UNAVAILABLE','UNIT_UNAVAILABLE','PID_UNAVAILABLE','DEADLINE'):return None
+    if php_endpoint and child['php_endpoint']['state']=='OBSERVED':
+        php=child['processes'][1]
+        if (php['load_state']!='loaded' or php['active_state']!='active'
+                or any(php[key] is not True for key in ('pid_available','exe_matches','net_namespace_matches'))
+                or not all(row['completed'] for row in stages if row['id'] in ('units_begin','units_end'))):
+            return None
     directory=child['datadir']
     if (type(directory) is not dict or set(directory)!={'state','is_directory','filesystem','device_matches'}
             or directory['state'] not in ('unknown','observed')

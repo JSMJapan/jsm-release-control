@@ -87,7 +87,17 @@ class ObservationOrderTests(unittest.TestCase):
             def observed(*args,_name=name,_original=original,**kwargs):
                 events.append(_name);return _original(*args,**kwargs)
             ns[name]=observed
-        child=ns['_observe']('b'*32,details=version>=3,discovery=version>=4,binding=version==5)
+        if version==6:
+            import test_db_php_endpoint
+            exec(test_db_php_endpoint.LIBRARY,ns)
+            def php_endpoint(first,last,deadline):
+                events.append('php_endpoint')
+                self.assertEqual(first,last)
+                self.assertEqual(deadline,3)
+                return ns['_php_endpoint_receipt']('NONE')
+            ns['_observe_php_endpoint']=php_endpoint
+        child=ns['_observe']('b'*32,details=version>=3,discovery=version>=4,
+            binding=version>=5,php_endpoint=version==6)
         self.assertIsNotNone(oscase.projection(child));self.assertNotIn('PRIVATE',json.dumps(child))
         self.assertEqual(child['sql'],'NOT_ATTEMPTED');self.assertEqual(child['db_proof'],'BLOCKED_TARGET_ADMISSION')
         return child,events,connection,queries
@@ -109,6 +119,17 @@ class ObservationOrderTests(unittest.TestCase):
             self.assertEqual(len(connection.sent),0 if delay>=3 else 1)
             if delay>=3:self.assertEqual(connection.connected,[])
             if delay==2.9:self.assertEqual(queries,[3.0,3.0])
+
+    def test_v6_fpm_profile_leaves_v5_docker_window_unchanged(self):
+        base,base_events,_,base_queries=self.case()
+        child,events,connection,queries=self.case(version=6)
+        self.assertEqual(child.pop('version'),'jsm-test-db-os-2760-v6')
+        self.assertEqual(base.pop('version'),'jsm-test-db-os-2760-v5')
+        self.assertIs(child.pop('php_endpoint')['fpm_worker_loopback_3306'],True)
+        self.assertEqual(child,base)
+        self.assertEqual(events,base_events+['php_endpoint'])
+        self.assertEqual(queries,base_queries)
+        self.assertEqual(len(connection.sent),1)
 
     def test_get_still_sits_inside_main_and_docker_unit_brackets(self):
         for role in ('apache','php'):
