@@ -191,16 +191,17 @@ def _fd_classify(error,reason=None):
             'FD_OS_REFUSED' if isinstance(error,OSError) else 'FD_REFUSED')
     try:error.fd_reason=reason
     except Exception:pass
-def _fd_sockets(pid,deadline):
+def _fd_sockets(pid,deadline,*,init_binding=False):
     fds=[];fd=None;found=set();count=0;reason=None
     try:
-        if not _pid_ready(pid):raise ValueError()
+        if not _pid_ready(pid) or type(init_binding)is not bool or init_binding and pid!=1:raise ValueError()
+        entry_limit=512 if init_binding else 128
         fds,name=_parents('/proc/'+str(pid)+'/fd',deadline)
         fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fds[-1])
         with os.scandir(fd) as entries:
             for entry in entries:
                 _check(deadline);count+=1
-                if count>128:reason='FD_ENTRY_LIMIT';raise ValueError()
+                if count>entry_limit:reason='FD_ENTRY_LIMIT';raise ValueError()
                 if not re.fullmatch('[0-9]{1,10}',entry.name):reason='FD_NAME_REFUSED';raise ValueError()
                 target=os.readlink(entry.name,dir_fd=fd)
                 if len(target)>4096:reason='FD_TARGET_LIMIT';raise ValueError()

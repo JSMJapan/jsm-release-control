@@ -1,3 +1,46 @@
+# 22.11.2026 — fixed init-binding PID1 profile512, default128 preserved
+
+**SOURCE CANDIDATE / RUNTIME NOT_RUN / DB ADMISSION BLOCKED.**
+[Approved plan7063218200](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7063218200),
+[owner CODE READY7071396023](https://github.com/JSMJapan/jsm-storefront/issues/2760#issuecomment-7071396023),
+base `6899bb5a284c402f4a04f45a1c06af491bec1041`.
+
+Actual [run44908160385](https://github.com/JSMJapan/jsm-release-control/actions/runs/44908160385)
+at13:19:07UTC reached entry129 in the first PID1 scan and returned FD_ENTRY_LIMIT,
+GET0/SQL0. Its total FD count and whether512/time will suffice remain UNKNOWN.
+This approved profile deliberately expands that bounded metadata-read allowance;
+it is not a reporting-only repair or TEST API/DB/isolation acceptance.
+
+The existing `_fd_sockets` engine has one code-owned boolean `init_binding=False`.
+Default/legacy v2/v3, Docker and every ordinary caller retain128, including a
+default PID1 call. Only `_binding_process('init',1)`, after successful typed PID,
+exe/start/net/mount/PID-namespace identity proof, requests `init_binding=True`.
+The engine permits this selector only for typed PID1; invalid selector type or
+PID refuses before paths/reads. No arbitrary numeric cap, ENV/CLI/input tuning,
+prefix, global pid==1 exception or new public receipt field exists.
+
+Both before and after use that same init512 profile. Full scan is required even
+after finding the listener: entry513 refuses before its readlink. Docker remains
+128 and refuses entry129 before readlink. Maximum PID1 readlinks across two
+snapshots rise256→1024, combined PID1+Docker512→1280. The same absolute0.75s,
+child3s/root4s/outer5s/other transport limits,4096 target bound, nofollow,
+cleanup/error reasons, process/namespace/listener/dualFD proof and SQL barrier
+remain. No retry/skipping/early success or budget extension. Pre-GET ambiguity
+means GET0; post-GET failure/drift discards rows with attempted=true/UNKNOWN.
+
+Boundary regression exercises the actual engine→begin/finish/projector at
+127/128/129/511/512/513, default PID1/Docker128/129, first/last listener and later
+failure, post-GET overflow/missing listener/start drift/deadline, target4096/4097,
+invalid selectors/PIDs/roles and identity refusal before scan. Existing tests
+retain private reason/exception/cleanup/legacy checks; init-cap reporting fixture
+now correctly uses513/512. Linux native inherited-listener fixture only adapts
+its synthetic role-map signature; it still never reads host PID1 or a daemon.
+The cohesive new profile test module is included in existing automatic CI path
+filters; no operational workflow changes. Final counts/CI and two non-author
+frozen-head reviews belong in the PR. CODE READY does not authorize merge or a
+new runtime; a separate owner decision is required. Rollback is reviewed revert
+of this source PR; no server/DB file is installed or written by preparation.
+
 # 21.11.2026 — closed FD refusal categories without changing the scan
 
 **SOURCE REPORTING REPAIR / RUNTIME NOT_RUN.** Existing #2760 scope,

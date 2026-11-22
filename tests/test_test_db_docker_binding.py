@@ -66,7 +66,7 @@ class DockerBindingTests(unittest.TestCase):
                 namespace=path.rsplit('/',1)[1]
                 return namespace+':['+('999' if state['namespace'] and path.startswith('/proc/1/') else {'net':'10','mnt':'11','pid':'12'}[namespace])+']'
             raise AssertionError('unapproved synthetic link')
-        def fds(pid,deadline):
+        def fds(pid,deadline,*,init_binding=False):
             self.assertIn(pid,(1,404))
             return ({8000+pid} if state['missing']==pid else {7003,8000+pid})|({99999} if state['extra'] else set())
         ns['_proc_read']=read;ns['_readlink']=link;ns['_fd_sockets']=fds
@@ -152,7 +152,7 @@ class DockerBindingTests(unittest.TestCase):
         for value in (None,'PRIVATE','DEADLINE',['FD_ENTRY_LIMIT'],('FD_ENTRY_LIMIT','PRIVATE'),True):
             with self.subTest(kind=type(value).__name__):
                 self.setUp();self.fixture();error=RuntimeError('PRIVATE','SECOND_PRIVATE');error.fd_reason=value
-                def refused(*args):raise error
+                def refused(*args,**kwargs):raise error
                 self.ns['_fd_sockets']=refused
                 packet,diagnostic,connection=self.call()
                 self.assertEqual(diagnostic['reason'],'FD_REFUSED');self.assertFalse(packet['attempted'])
@@ -280,10 +280,10 @@ class DockerBindingTests(unittest.TestCase):
                     else RuntimeError('PRIVATE','SECOND_PRIVATE'))
                 error.fd_reason=('PRIVATE' if case=='unknown_reason' else ('FD_ENTRY_LIMIT','PRIVATE'))
                 original_type,original_args=type(error),error.args
-                def reader(pid,deadline):
+                def reader(pid,deadline,*,init_binding=False):
                     seen.append(pid)
                     if pid!=1:return fallback(pid,deadline)
-                    names=[str(i) for i in range(129)] if case=='cap' else ['PRIVATE'] if case=='name' else ['1','2']
+                    names=[str(i) for i in range(513)] if case=='cap' else ['PRIVATE'] if case=='name' else ['1','2']
                     def parents(*args):
                         if case=='parents':raise error
                         return [40,41],'fd'
@@ -307,7 +307,7 @@ class DockerBindingTests(unittest.TestCase):
                             patch.object(self.ns['os'],'scandir',side_effect=scan), \
                             patch.object(self.ns['os'],'readlink',side_effect=link), \
                             patch.object(self.ns['os'],'close',side_effect=close):
-                        try:return actual(pid,deadline)
+                        try:return actual(pid,deadline,init_binding=True) if init_binding else actual(pid,deadline)
                         except Exception as failure:caught.append(failure);raise
                 self.ns['_fd_sockets']=reader
                 packet,diagnostic,connection=self.call()
@@ -329,7 +329,7 @@ class DockerBindingTests(unittest.TestCase):
                     elif case!='iterate':
                         self.assertIs(caught[0],error);self.assertIs(type(error),original_type)
                         self.assertEqual(error.args,original_args)
-                if case=='cap':self.assertEqual(len(links),128)
+                if case=='cap':self.assertEqual(len(links),512)
                 if case=='name':self.assertEqual(links,[])
                 if case in ('missing','permission','private','unknown_reason'):self.assertEqual(len(links),1)
                 self.assertEqual(closed,[] if case=='parents' else [41,40] if case=='open'
@@ -443,7 +443,7 @@ class DockerBindingTests(unittest.TestCase):
             try:
                 self.assertEqual(ready.get(timeout=2),kernel)
                 state['unix']=UNIX.replace('7003',str(kernel))
-                self.ns['_fd_sockets']=lambda pid,deadline:{inode(os.getpid() if pid==1 else child.pid)}
+                self.ns['_fd_sockets']=lambda pid,deadline,*,init_binding=False:{inode(os.getpid() if pid==1 else child.pid)}
                 api=SimpleNamespace(AF_UNIX=socket.AF_UNIX,SOCK_STREAM=socket.SOCK_STREAM,SO_PEERCRED=socket.SO_PEERCRED,SOL_SOCKET=socket.SOL_SOCKET,timeout=socket.timeout,socket=Connection)
                 with patch.dict(self.ns,{'socket':api}):
                     unit=dict(load='loaded',active='active',pid=404);deadline=time.monotonic()+2
