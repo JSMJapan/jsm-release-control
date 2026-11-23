@@ -30,7 +30,7 @@ _BOOT_LIBEXEC = ('usr', 'local', 'libexec')
 _BOOT_PARENTS = (_BOOT_LOCAL, ('var', 'lib'), ('etc', 'sudoers.d'))
 _BOOT_CHAINS = (*_BOOT_PARENTS, _BOOT_LIBEXEC)
 _BOOT_MEMBERS = {
-    'receiver.py': ('test_installer_update_receiver.py', 0o644, 18327, '7d7427fcceb9aacb8fe6f23d70abb69344f4cd7ea064e648d4f6e42522331b39'),
+    'receiver.py': ('test_installer_update_receiver.py', 0o644, 20349, '092850b35c348f46d5b02a147a28d94bcd6411b307be8120495c72eb8c6b3a74'),
     'package.py': ('test_installer_update_package.py', 0o644, 2468, 'e40fd150cd9b3f639db36024344a1962f96845cfd287077f56df2300e1c79fe5'),
     'forced_command.sh': ('forced-command', 0o755, 371, 'cf1baf6bf9603278af1da8c92b6b6dd49f9f5e24aaf2cd32824694e3709385c4'),
 }

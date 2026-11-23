@@ -28,6 +28,7 @@ _STATE_CHAIN = (*_REPORTER_CHAIN, 'jsm-test-installer-writer', 'state')
 _ALLOWED_CHAINS = (_TARGET_CHAIN, _REPORTER_CHAIN, _LOCK_CHAIN, _STATE_CHAIN)
 _PREVIOUS = 'previous'
 _CANDIDATE = 'candidate'
+_STAGED = 'staged'
 _TARGET = 'jsm-sandbox-deploy'
 _REPORTER = 'jsm-test-db-report'
 _REPORTER_PIN = 'jsm-test-db-report.sha256'
@@ -236,9 +237,10 @@ def _unlink_stage(fd, directory, name):
         pass
 
 
-def _stage(stack, target, raw, *, mode=None):
+def _stage(stack, target, raw, *, mode=None, name=None):
     directory = target.chain.fds[-1]
-    name = '.jsm-test-installer-update-' + secrets.token_hex(16)
+    if name is None:
+        name = '.jsm-test-installer-update-' + secrets.token_hex(16)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
     fd = os.open(name, flags, 0o600, dir_fd=directory)
     stack.callback(os.close, fd)
@@ -298,8 +300,7 @@ def _ensure_backup(stack, state, target, original):
         record = _stage(stack, target._replace(chain=state), original, mode=0o600)
         directory = state.fds[-1]
         _check_file(record)
-        os.link(record.name, _PREVIOUS, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
-        os.unlink(record.name, dir_fd=directory)
+        os.replace(record.name, _PREVIOUS, src_dir_fd=directory, dst_dir_fd=directory)
         os.fsync(directory)
     return _backup(stack, state, target)[0]
 
@@ -311,7 +312,7 @@ def _candidate(stack, state, target):
     return candidate
 
 
-def _discard_uninstalled_pin(staged, state):
+def _discard_uninstalled_pin(staged, state, target):
     # If the stage is still named, no replacement committed. Retire only
     # our own link. A disappearing stage leaves the durable pin in place.
     try:
@@ -322,20 +323,20 @@ def _discard_uninstalled_pin(staged, state):
         return
     expected = (held.st_dev, held.st_ino)
     if (current.st_dev, current.st_ino) == expected == (candidate.st_dev, candidate.st_ino):
-        _check_chain(staged.chain)
+        _check_chain(target.chain)
         _check_chain(state)
-        installed = _lstat(staged.chain, _TARGET)
+        installed = _lstat(target.chain, _TARGET)
         if (installed.st_dev, installed.st_ino) == expected:
             return
         os.unlink(_CANDIDATE, dir_fd=state.fds[-1])
         os.fsync(state.fds[-1])
 
 
-def _pin_candidate(stack, staged, state):
+def _pin_candidate(stack, staged, state, target):
     _check_file(staged)
     directory = state.fds[-1]
     os.link(staged.name, _CANDIDATE, src_dir_fd=staged.chain.fds[-1], dst_dir_fd=directory, follow_symlinks=False)
-    stack.callback(_discard_uninstalled_pin, staged, state)
+    stack.callback(_discard_uninstalled_pin, staged, state, target)
     updated = staged._replace(info=os.fstat(staged.fd))
     if not _safe_file(updated.info, True, links=2):
         raise ValueError()
@@ -354,6 +355,49 @@ def _retire_candidate(state, candidate):
         raise ValueError()
     os.unlink(_CANDIDATE, dir_fd=state.fds[-1])
     os.fsync(state.fds[-1])
+
+
+def _optional_state_file(stack, state, name):
+    try:
+        info = _lstat(state, name)
+    except FileNotFoundError:
+        return None
+    if info.st_nlink not in (1, 2):
+        raise ValueError()
+    return _open_regular(stack, state, name, links=info.st_nlink)
+
+
+def _clear_interrupted_apply(stack, state, target, lock, original):
+    # This never changes the serving name. It is only valid for a verified
+    # original target and the root-private, fixed transaction namespace.
+    if target.info.st_nlink != 1 or sha256(original).hexdigest() != ORIGINAL_SHA256:
+        raise ValueError()
+    staged = _optional_state_file(stack, state, _STAGED)
+    candidate = _optional_state_file(stack, state, _CANDIDATE)
+    if staged is None and candidate is None:
+        return
+    if staged is not None and candidate is not None:
+        if (staged.info.st_nlink != 2 or _file_stamp(staged.info) != _file_stamp(candidate.info)
+                or sha256(_read_exact(staged, MAX_INSTALLER_BYTES)).hexdigest() != UPDATED_SHA256):
+            raise ValueError()
+    elif (staged or candidate).info.st_nlink != 1:
+        raise ValueError()
+
+    for record in (staged, candidate):
+        if record is not None:
+            if record.info.st_dev != target.info.st_dev or os.listxattr(record.fd):
+                raise ValueError()
+            _check_file(record)
+    _check_file(lock)
+    _check_file(target)
+    # Drop the staged name first. If interrupted, the next retry sees the
+    # same safe single-link private candidate as it would after rollback.
+    directory = state.fds[-1]
+    if staged is not None:
+        os.unlink(_STAGED, dir_fd=directory)
+    if candidate is not None:
+        os.unlink(_CANDIDATE, dir_fd=directory)
+    os.fsync(directory)
 
 
 def _apply(operation):
@@ -430,9 +474,11 @@ def _apply(operation):
                 phase = 'RECOVERY_REFUSED'
                 state = _state(stack)
                 previous = _ensure_backup(stack, state, target, original)
-            staged = _stage(stack, target, replacement)
-            if operation == 'APPLY':
-                staged, candidate = _pin_candidate(stack, staged, state)
+                _clear_interrupted_apply(stack, state, target, lock, original)
+                staged = _stage(stack, target._replace(chain=state), replacement, name=_STAGED)
+                staged, candidate = _pin_candidate(stack, staged, state, target)
+            else:
+                staged = _stage(stack, target, replacement)
             phase = 'WRITE_REFUSED'
             for recovery_record in (previous, candidate):
                 if recovery_record is not None:
@@ -444,10 +490,12 @@ def _apply(operation):
             _check_file(target)
             if os.listxattr(target.fd) or os.listxattr(staged.fd):
                 return phase
-            os.replace(staged.name, target.name, src_dir_fd=chain.fds[-1], dst_dir_fd=chain.fds[-1])
+            os.replace(staged.name, target.name, src_dir_fd=staged.chain.fds[-1], dst_dir_fd=chain.fds[-1])
 
             phase = 'READBACK_UNCERTAIN'
             os.fsync(chain.fds[-1])
+            if operation == 'APPLY':
+                os.fsync(state.fds[-1])
             _readback(stack, target, staged, expected)
             _check_file(lock)
             for item in reporter:

@@ -234,7 +234,7 @@ class ReceiverTests(unittest.TestCase):
 
         def change_after_stage(*args, **kwargs):
             staged = stage(*args, **kwargs)
-            if staged.chain.parts == receiver._STATE_CHAIN:
+            if staged.name != receiver._STAGED:
                 return staged
             sibling = self.root / 'intervening'
             sibling.write_bytes(intervening)
@@ -260,7 +260,9 @@ class ReceiverTests(unittest.TestCase):
             os.fsync(fd)
 
         def verify_pins_before_replace(source, destination, **kwargs):
-            self.assertEqual(destination, receiver._TARGET)
+            if destination != receiver._TARGET:
+                os.replace(source, destination, **kwargs)
+                return
             self.assertEqual(self.previous.read_bytes(), ORIGINAL)
             for path in (self.previous, self.candidate, self.state):
                 info = path.stat()
@@ -298,6 +300,40 @@ class ReceiverTests(unittest.TestCase):
         self.assertEqual(receiver.handle(request('RECOVER')), 'RECOVERY_REFUSED')
         self.assertEqual(self.target.stat().st_ino, third)
         self.assert_target(UPDATED)
+
+    def test_retry_after_interruption_between_durable_pin_and_replace(self):
+        staged = self.state / receiver._STAGED
+        staged.write_bytes(UPDATED)
+        staged.chmod(0o750)
+        os.link(staged, self.candidate)
+        old_candidate = os.open(self.candidate, os.O_RDONLY)
+        self.addCleanup(os.close, old_candidate)
+
+        self.assertEqual(receiver.handle(request('APPLY')), 'APPLIED')
+        self.assert_target(UPDATED)
+        self.assertFalse(staged.exists())
+        self.assertNotEqual(self.candidate.stat().st_ino, os.fstat(old_candidate).st_ino)
+        self.assertEqual(self.candidate.stat().st_ino, self.target.stat().st_ino)
+
+    def test_retry_after_restore_commits_before_pin_retirement(self):
+        self.assertEqual(receiver.handle(request('APPLY')), 'APPLIED')
+        with patch.object(receiver, '_retire_candidate', side_effect=OSError()):
+            self.assertEqual(receiver.handle(request('ROLLBACK')), 'READBACK_UNCERTAIN')
+        self.assert_target(ORIGINAL)
+        self.assertEqual(self.candidate.stat().st_nlink, 1)
+
+        self.assertEqual(receiver.handle(request('APPLY')), 'APPLIED')
+        self.assert_target(UPDATED)
+        self.assertEqual(self.candidate.stat().st_ino, self.target.stat().st_ino)
+
+    def test_conflicting_transaction_entries_preserve_current_original(self):
+        staged = self.state / receiver._STAGED
+        staged.write_bytes(UPDATED)
+        self.candidate.write_bytes(UPDATED)
+        self.assertEqual(receiver.handle(request('APPLY')), 'RECOVERY_REFUSED')
+        self.assert_target(ORIGINAL)
+        self.assertEqual(staged.read_bytes(), UPDATED)
+        self.assertEqual(self.candidate.read_bytes(), UPDATED)
 
     def test_nonprivate_recovery_directory_blocks_apply_before_target_change(self):
         self.state.chmod(0o750)
