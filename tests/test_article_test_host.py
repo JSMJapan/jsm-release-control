@@ -21,7 +21,7 @@ class Engine:
     latest=None
     def __init__(self,path,deadline):
         self.path=path;self.deadline=deadline;self.rows={};self.tags={};self.calls=[];self.created=[];Engine.latest=self
-    def absent(self,run,tags):self.tags={tag:None for tag in tags}
+    def absent(self,run,tags,aliases):self.tags={tag:None for tag in tags}
     def image_id(self,tag):return self.tags.get(tag)
     def create(self,args):
         self.calls.append(('create',args));role='db' if '--read-only' not in args else 'app'

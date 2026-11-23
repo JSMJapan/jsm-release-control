@@ -4,11 +4,14 @@ import os
 from pathlib import Path
 import re
 import selectors
+import socket
+import struct
 import signal
 import stat
 import subprocess
 import time
 from apache_parity_bridge import strict_json
+from article_test_actions import HeaderResponse
 
 LABEL='com.jsmjapan.article-test.run'
 ID=re.compile('[0-9a-f]{64}')
@@ -29,6 +32,28 @@ FIELDS={'id':'.Id','image':'.Image','run':'(index .Config.Labels "'+LABEL+'")','
  'security':'.HostConfig.SecurityOpt','ports':'.HostConfig.PortBindings','pidmode':'.HostConfig.PidMode',
  'ipcmode':'.HostConfig.IpcMode','mounts':'.Mounts','log':'.HostConfig.LogConfig','hosts':'.HostConfig.ExtraHosts','tmpfs':'.HostConfig.Tmpfs'}
 FORMAT='{'+','.join('"'+k+'":{{json '+v+'}}' for k,v in FIELDS.items())+'}'
+
+
+def image_presence_reply(connection,identity,deadline):
+    """Headers only for an existing image; never read its JSON Config/Env body."""
+    response=HeaderResponse(connection,deadline=deadline)
+    try:
+        response.begin()
+        if response.status==200:return True
+        require(response.status==404,'ARTICLE_IMAGE_PRESENCE_UNCONFIRMED')
+        headers=response.getheaders();lengths=[v for k,v in headers if k.lower()=='content-length']
+        require(len(lengths)==1 and re.fullmatch('[1-9][0-9]{0,2}',lengths[0]) and int(lengths[0])<=512
+            and not any(k.lower()=='transfer-encoding' or k.lower()=='content-encoding' for k,v in headers)
+            and response.getheader('content-type','').split(';')[0].strip().lower()=='application/json',
+            'ARTICLE_IMAGE_PRESENCE_UNCONFIRMED')
+        size=int(lengths[0]);raw=bytearray()
+        while len(raw)<size:
+            left=deadline-time.monotonic();require(left>0,'ARTICLE_STAGE_DEADLINE');connection.settimeout(left)
+            part=response.read1(size-len(raw));require(bool(part),'ARTICLE_IMAGE_PRESENCE_UNCONFIRMED');raw.extend(part)
+        require(time.monotonic()<deadline,'ARTICLE_STAGE_DEADLINE')
+        require(strict_json(raw.decode('utf-8'))=={'message':'No such image: '+identity},'ARTICLE_IMAGE_PRESENCE_UNCONFIRMED')
+        return False
+    finally:response.close()
 
 
 class Docker:
@@ -105,9 +130,36 @@ class Docker:
         rows=self.run(('image','ls','--quiet','--no-trunc','--filter','reference='+tag),limit=256).decode('ascii').splitlines()
         require(len(rows)<=1 and all(IMAGE.fullmatch(row) for row in rows));return rows[0] if rows else None
 
-    def absent(self,run,tags):
+    def image_present(self,identity):
+        require(type(identity) is str and IMAGE.fullmatch(identity))
+        deadline=min(self.deadline,time.monotonic()+2);connection=None
+        def stamp(info):return info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid,info.st_nlink,info.st_ctime_ns
+        try:
+            parent=os.stat('/run',follow_symlinks=False);first=os.stat('/run/docker.sock',follow_symlinks=False)
+            require(stat.S_ISDIR(parent.st_mode) and parent.st_uid==0 and not parent.st_mode&0o022
+                and stat.S_ISSOCK(first.st_mode) and first.st_uid==0 and first.st_nlink==1 and not first.st_mode&0o002)
+            require(time.monotonic()<deadline,'ARTICLE_STAGE_DEADLINE')
+            connection=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);connection.settimeout(deadline-time.monotonic())
+            connection.connect('/run/docker.sock')
+            _,uid,_=struct.unpack('3i',connection.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,struct.calcsize('3i')))
+            require(uid==0)
+            connection.settimeout(max(.001,deadline-time.monotonic()))
+            connection.sendall(('GET /images/'+identity+'/json HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n').encode('ascii'))
+            result=image_presence_reply(connection,identity,deadline)
+            require(stamp(first)==stamp(os.stat('/run/docker.sock',follow_symlinks=False))
+                and stamp(parent)==stamp(os.stat('/run',follow_symlinks=False)))
+            return result
+        except DockerRefused:raise
+        except Exception:raise DockerRefused('ARTICLE_IMAGE_PRESENCE_UNCONFIRMED') from None
+        finally:
+            if connection is not None:connection.close()
+
+    def absent(self,run,tags,aliases):
         require(type(run) is str and re.fullmatch('[0-9a-f]{12}',run))
+        require(type(aliases) is tuple and len(aliases)==2 and all(type(pair) is tuple and 1<=len(pair)<=2 and all(type(x) is str and IMAGE.fullmatch(x) for x in pair) for pair in aliases))
         for tag in tags:require(self.image_id(tag) is None,'ARTICLE_NAME_COLLISION')
+        for identity in dict.fromkeys(x for pair in aliases for x in pair):
+            require(self.image_present(identity) is False,'ARTICLE_EXISTING_IMAGE_REFUSED')
         for role in ('db','app'):
             name='jsm-article-2760-'+role+'-'+run
             raw=self.run(('container','ls','--all','--quiet','--no-trunc','--filter','name=^'+name+'$'),limit=256)

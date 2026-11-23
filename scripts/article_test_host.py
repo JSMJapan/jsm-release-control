@@ -226,7 +226,7 @@ def cleanup(store,state,docker,deadline):
                 current=docker.image_id(tag)
                 if current is not None:
                     require(current in aliases,'ARTICLE_CLEANUP_UNCONFIRMED')
-                    docker.run(('image','rm',tag),seconds=20,limit=4096)
+                    docker.run(('image','rm','--no-prune',tag),seconds=20,limit=4096)
                     require(docker.image_id(tag) is None,'ARTICLE_CLEANUP_UNCONFIRMED')
             except Exception:failures.append('image')
     if failures or state['import_started'] and not state['import_complete']:
@@ -296,7 +296,7 @@ def stage(store,build,control_sha,bundle,deadline,docker_type=Docker):
     try:
         docker=docker_type(store.path,deadline)
         resource_admission(store,archive.stat().st_size,proof,docker)
-        docker.absent(store.run,build.tags)
+        docker.absent(store.run,build.tags,proof.aliases)
         extract_metadata(archive,store.path,inspected)
         root=secrets.token_hex(32);reader=secrets.token_hex(32)
         store.write('root.password',root.encode(),0o444)
