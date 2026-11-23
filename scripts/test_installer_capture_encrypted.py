@@ -39,12 +39,12 @@ REFUSALS = frozenset((
 ))
 
 
-def context_ready(env):
+def context_ready(env, *, workflow=WORKFLOW, recipient_sha256=RECIPIENT_SHA256):
     required = dict(
         GITHUB_REPOSITORY=REPO, GITHUB_ACTOR='JSMJapan', GITHUB_TRIGGERING_ACTOR='JSMJapan',
         GITHUB_REF='refs/heads/main', GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_RUN_ATTEMPT='1',
         GITHUB_SERVER_URL='https://github.com', GITHUB_API_URL='https://api.github.com',
-        GITHUB_WORKFLOW_REF=REPO + '/.github/workflows/' + WORKFLOW + '@refs/heads/main',
+        GITHUB_WORKFLOW_REF=REPO + '/.github/workflows/' + workflow + '@refs/heads/main',
     )
     source_sha = env.get('GITHUB_SHA', '')
     run_id = env.get('GITHUB_RUN_ID', '')
@@ -52,7 +52,7 @@ def context_ready(env):
          and re.fullmatch('[0-9a-f]{40}', source_sha) and env.get('GITHUB_WORKFLOW_SHA') == source_sha
          and re.fullmatch('[0-9]{1,15}', run_id), 'EXACT_OWNER_MAIN_CAPTURE_REQUIRED')
     need(env.get('APPROVED_CAPTURE_SHA') == source_sha
-         and env.get('APPROVED_RECIPIENT_SHA256') == RECIPIENT_SHA256,
+         and env.get('APPROVED_RECIPIENT_SHA256') == recipient_sha256,
          'EXACT_CAPTURE_APPROVAL_REQUIRED')
 
 
@@ -71,16 +71,16 @@ def verify_policy(api):
         raise Refused('PROTECTED_TEST_OWNER_MAIN_ENVIRONMENT_REQUIRED') from None
 
 
-def recipient():
+def recipient(*, certificate=CERTIFICATE, recipient_sha256=RECIPIENT_SHA256):
     try:
-        pem = _read_regular(CERTIFICATE, 2048)
-        need(hashlib.sha256(pem).hexdigest() == RECIPIENT_SHA256, 'RECIPIENT_NOT_CONFIRMED')
+        pem = _read_regular(certificate, 2048)
+        need(hashlib.sha256(pem).hexdigest() == recipient_sha256, 'RECIPIENT_NOT_CONFIRMED')
         return pem
     except Exception:
         raise Refused('RECIPIENT_NOT_CONFIRMED') from None
 
 
-def project_remote(raw, nonce, pem):
+def project_remote(raw, nonce, pem, *, version='jsm-test-installer-cms-v1', statuses=STATUSES):
     try:
         need(type(raw) is bytes and 0 < len(raw) <= OUTER_LIMIT, 'CAPTURE_RECEIPT_REJECTED')
         outer = strict_json(raw.decode('ascii'))
@@ -90,10 +90,10 @@ def project_remote(raw, nonce, pem):
              and 0 < outer['euid'] <= 4294967295, 'CAPTURE_RECEIPT_REJECTED')
         child = outer['root_diagnostic']
         need(type(child) is dict and set(child) == {'version', 'nonce', 'euid', 'status', 'ciphertext'}
-             and child['version'] == 'jsm-test-installer-cms-v1' and child['nonce'] == nonce
+             and child['version'] == version and child['nonce'] == nonce
              and type(child['euid']) is int and child['euid'] == 0, 'CAPTURE_RECEIPT_REJECTED')
         status = child['status']
-        if (type(status) is str and status in STATUSES[1:]
+        if (type(status) is str and status in statuses[1:]
                 and child['ciphertext'] is None):
             return status, None
 
@@ -109,17 +109,13 @@ def project_remote(raw, nonce, pem):
         raise Refused('CAPTURE_RECEIPT_REJECTED') from None
 
 
-def collect(api, env):
-    deadline = time.monotonic() + OVERALL_SECONDS
-    context_ready(env)
-    verify_policy(api)
-    pem = recipient()
+def _receive(env, deadline, render_program):
     key, known = env.get('TEST_API_ADMIN_SSH_KEY'), env.get('TEST_API_KNOWN_HOSTS')
     need(type(key) is str and 0 < len(key) <= 16384 and '\x00' not in key, 'TEST_SSH_KEY_NOT_CONFIGURED')
     need(type(known) is str and len(known) <= 16384 and hashlib.sha256(known.encode()).hexdigest() == PIN_SHA256,
          'EXACT_TEST_HOST_PIN_REQUIRED')
     nonce = secrets.token_hex(16)
-    program = wrap_root_program(nonce, render(nonce, pem, RECIPIENT_SHA256))
+    program = wrap_root_program(nonce, render_program(nonce))
     with tempfile.TemporaryDirectory(prefix='jsm-test-installer-ssh-') as folder:
         identity, hosts = Path(folder) / 'identity', Path(folder) / 'known_hosts'
         private_file(identity, key.replace('\r\n', '\n').rstrip('\n') + '\n')
@@ -142,22 +138,31 @@ def collect(api, env):
         except Exception:
             raise Refused('SSH_TRANSPORT_NOT_CONFIRMED') from None
         need(code == 0, 'SSH_TRANSPORT_NOT_CONFIRMED')
+    return raw, nonce
+
+
+def collect(api, env):
+    deadline = time.monotonic() + OVERALL_SECONDS
+    context_ready(env)
+    verify_policy(api)
+    pem = recipient()
+    raw, nonce = _receive(env, deadline, lambda challenge: render(challenge, pem, RECIPIENT_SHA256))
     status, ciphertext = project_remote(raw, nonce, pem)
     need(status == 'CAPTURED', status)
     return ciphertext
 
 
-def write_artifact(directory, ciphertext):
+def write_artifact(directory, ciphertext, *, filename=FILENAME):
     try:
         need(os.path.isabs(directory), 'ARTIFACT_WRITE_REFUSED')
         fd = os.open(directory, os.O_DIRECTORY | os.O_RDONLY | os.O_NOFOLLOW)
         try:
-            output = os.open(FILENAME, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+            output = os.open(filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
             try:
                 with os.fdopen(output, 'wb') as file:
                     file.write(ciphertext)
             except Exception:
-                os.unlink(FILENAME, dir_fd=fd)
+                os.unlink(filename, dir_fd=fd)
                 raise
         finally:
             os.close(fd)
@@ -165,33 +170,38 @@ def write_artifact(directory, ciphertext):
         raise Refused('ARTIFACT_WRITE_REFUSED') from None
 
 
-def main():
+def _run_capture(verify_context, collect_source, *, source, version, filename, recipient_sha256, refusals):
     def expired(*_):
         raise Refused('OVERALL_DEADLINE')
 
     receipt = dict(
-        version='jsm-test-installer-capture-2760-v1', status='BLOCKED',
-        target=TARGET, source=SOURCE, sql='NOT_ATTEMPTED', db_isolation='NOT_ESTABLISHED',
+        version=version, status='BLOCKED',
+        target=TARGET, source=source, sql='NOT_ATTEMPTED', db_isolation='NOT_ESTABLISHED',
     )
     try:
         need(len(sys.argv) == 1, 'EXACT_OWNER_MAIN_CAPTURE_REQUIRED')
-        context_ready(os.environ)
+        verify_context(os.environ)
         receipt['workflow_sha'] = os.environ['GITHUB_SHA']
         signal.signal(signal.SIGALRM, expired)
         signal.setitimer(signal.ITIMER_REAL, OVERALL_SECONDS)
         directory = os.environ.get('RUNNER_TEMP', '')
         need(os.path.isabs(directory), 'ARTIFACT_WRITE_REFUSED')
-        ciphertext = collect(TestPolicyApi(), os.environ)
-        write_artifact(directory, ciphertext)
-        receipt.update(status='ENCRYPTED_ARTIFACT_STAGED', recipient_sha256=RECIPIENT_SHA256,
+        ciphertext = collect_source(TestPolicyApi(), os.environ)
+        write_artifact(directory, ciphertext, filename=filename)
+        receipt.update(status='ENCRYPTED_ARTIFACT_STAGED', recipient_sha256=recipient_sha256,
                        ciphertext_sha256=hashlib.sha256(ciphertext).hexdigest())
     except Exception as error:
         reason = error.args[0] if isinstance(error, Refused) and len(error.args) == 1 else None
-        receipt['reason'] = reason if type(reason) is str and reason in REFUSALS else 'CAPTURE_REFUSED'
+        receipt['reason'] = reason if type(reason) is str and reason in refusals else 'CAPTURE_REFUSED'
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
     print(json.dumps(receipt, sort_keys=True, separators=(',', ':')))
     return 0 if receipt['status'] == 'ENCRYPTED_ARTIFACT_STAGED' else 1
+
+
+def main():
+    return _run_capture(context_ready, collect, source=SOURCE, version='jsm-test-installer-capture-2760-v1',
+                        filename=FILENAME, recipient_sha256=RECIPIENT_SHA256, refusals=REFUSALS)
 
 
 if __name__ == '__main__':
