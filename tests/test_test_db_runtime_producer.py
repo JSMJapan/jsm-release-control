@@ -1,5 +1,6 @@
 """Actual root coordinator and FastCGI framing, synthetic peers only."""
 from pathlib import Path
+from types import SimpleNamespace
 import socket
 import struct
 import sys
@@ -11,7 +12,10 @@ from unittest.mock import patch
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT/'scripts'))
 import test_db_runtime_producer as producer
 from test_db_runtime_protocol import Rejected
-from test_db_runtime_fastcgi import FastCGI, record, SCRIPT
+from test_db_runtime_fastcgi import FastCGI, record, ENTRY_NAME
+
+
+STAGING={'path':'/run/jsm-db-2760-'+'a'*32}
 
 
 class Wire:
@@ -72,6 +76,33 @@ class ProducerTests(unittest.TestCase):
         for credentials in ((40,0,0),(40,1000,1000),(41,33,33),(40,34,34)):
             with self.assertRaises(Rejected):producer.worker_from_peer(snapshot,credentials,kernel,1)
 
+    def test_sql_authorization_attempt_retained_if_send_completed_then_failed(self):
+        wire=Wire();original=wire.send
+        def send(role,seq,value):
+            original(role,seq,value)
+            if seq==4:raise Rejected('DEADLINE')
+        wire.send=send;receipt=producer.closed()
+        with self.assertRaises(Rejected):producer.dialogue(wire,Kernel(),40,1000,receipt)
+        self.assertEqual(receipt['sql'],'AUTHORIZED_NOT_CONFIRMED')
+
+    def test_control_context_is_separate_and_bad_initial_gate_never_sends_fastcgi(self):
+        from test_db_runtime_control_contract import SCOPE, REFERENCE_SITE_SHA
+        context=dict(scope=dict(SCOPE),run=dict(workflow_sha='a'*40,requested_site_sha=REFERENCE_SITE_SHA,
+            id='123',attempt=1,actor='JSMJapan',triggering_actor='JSMJapan'),control_sha='a'*40)
+        self.assertEqual(len(producer.control_context_digest(context)),64)
+        self.assertEqual(producer.collect(context)['reason'],'CONTEXT_REQUIRED')
+        fake=SimpleNamespace(ns={'_manifest_lock':lambda deadline:10},fpm=lambda:((),40))
+        staging=dict(path=STAGING['path'],device=1,inode=2,files={name:dict(device=1,inode=n+3,size=1,sha256='a'*64)
+            for n,name in enumerate(__import__('test_db_runtime_control_contract').PHP_FILES)})
+        closes=[]
+        with patch.object(producer,'os',SimpleNamespace(geteuid=lambda:0,close=closes.append)),\
+             patch.object(producer,'sys',SimpleNamespace(platform='linux')),patch.object(producer,'Kernel',return_value=fake),\
+             patch.object(producer,'pre_entry',side_effect=Rejected('PRE_ENTRY_CONFIG_REFUSED')),patch.object(producer,'FastCGI') as fcgi:
+            result=producer.collect_control(context,staging,time.monotonic_ns()+3_000_000_000)
+        self.assertEqual(result['reason'],'PRE_ENTRY_CONFIG_REFUSED');self.assertEqual(result['fastcgi_state'],'NOT_SENT')
+        self.assertEqual(closes,[10]);fcgi.assert_not_called()
+        self.assertEqual(result['effective_ini_selection'],'NOT_ATTESTED');self.assertEqual(result['worker_memory'],'NOT_ATTESTED')
+
     def test_actual_fastcgi_request_fixed_script_no_body_and_bounded_drain(self):
         root,php=socket.socketpair();observed=[]
         def peer():
@@ -79,10 +110,10 @@ class ProducerTests(unittest.TestCase):
                 data=php.recv(8192);observed.append(data)
                 php.sendall(record(6,b'Content-type: text/html\r\n\r\n')+record(3,b'\0'*8))
         thread=threading.Thread(target=peer);thread.start()
-        request=FastCGI('a'*32,'b'*64,'c'*32,time.monotonic()+3,stream=root)
+        request=FastCGI('a'*32,'b'*64,'c'*32,time.monotonic()+3,STAGING,stream=root)
         try:request.finish()
         finally:request.close();thread.join()
-        self.assertIn(SCRIPT.encode(),observed[0]);self.assertNotIn(b'PHP_VALUE',observed[0])
+        self.assertIn(ENTRY_NAME.encode(),observed[0]);self.assertNotIn(b'PHP_VALUE',observed[0])
         self.assertTrue(observed[0].endswith(record(5)))
 
     def test_fastcgi_stderr_oversize_and_peer_check_fail_closed(self):
@@ -94,14 +125,14 @@ class ProducerTests(unittest.TestCase):
                     try:php.sendall(packet)
                     except OSError:pass
             thread=threading.Thread(target=peer);thread.start()
-            request=FastCGI('a'*32,'b'*64,'c'*32,time.monotonic()+3,stream=root)
+            request=FastCGI('a'*32,'b'*64,'c'*32,time.monotonic()+3,STAGING,stream=root)
             try:
                 with self.assertRaisesRegex(Rejected,'^FASTCGI_REFUSED$'):request.finish()
                 self.assertNotIn('PRIVATE',str(request.error))
             finally:request.close();thread.join()
         root,php=socket.socketpair()
         with php:
-            with self.assertRaises(Rejected):FastCGI('a'*32,'b'*64,'c'*32,time.monotonic()+3,stream=root,peer_check=lambda s:(_ for _ in ()).throw(Rejected('FPM_REFUSED')))
+            with self.assertRaises(Rejected):FastCGI('a'*32,'b'*64,'c'*32,time.monotonic()+3,STAGING,stream=root,peer_check=lambda s:(_ for _ in ()).throw(Rejected('FPM_REFUSED')))
             self.assertEqual(php.recv(1),b'')
 
 if __name__=='__main__':unittest.main()

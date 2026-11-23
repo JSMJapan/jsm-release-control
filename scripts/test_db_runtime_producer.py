@@ -12,21 +12,14 @@ import struct
 import sys
 import time
 
-from test_db_runtime_protocol import VERSION, Rejected, Wire, context_digest
+from test_db_runtime_protocol import VERSION, Rejected, Wire, context_digest, control_context_digest
 from test_db_runtime_fastcgi import FastCGI
 from test_db_runtime_kernel import Kernel
+from test_db_runtime_preentry import observe as pre_entry
+from test_db_runtime_staging_view import verify as staging_view
+from test_db_runtime_control_contract import staging_valid
 
-STAGES=('CONTEXT','FPM_BEFORE','CHANNEL','STARTUP','LOCAL_TARGET','CONNECT','PEER_BEFORE_SQL','SELECT','PEER_AFTER_SQL','FPM_AFTER','FASTCGI_END','COMPLETE')
-REASONS=('CONTEXT_REQUIRED','ROOT_LINUX_REQUIRED','FPM_REFUSED','CHANNEL_REFUSED','FRAME_REFUSED','FRAME_LIMIT',
-         'DEADLINE','FASTCGI_REFUSED','STARTUP_REFUSED','CONFIG_SHAPE_REFUSED','GENERATED_CONFIG_REFUSED',
-         'STARTUP_SOURCE_REFUSED','STARTUP_HOOK_REFUSED','STARTUP_CONTEXT_REFUSED','VENDOR_PROFILE_REFUSED',
-         'MODEL_SOURCE_REFUSED','PROC_REFUSED','CGROUP_UNAVAILABLE','APPLICATION_REFUSED','DB_DEFINITION_REFUSED','PDO_ATTRIBUTE_REFUSED','PDO_CAPABILITY_REFUSED',
-         'PDO_AUTH_REFUSED','PDO_CONNECT_REFUSED','PDO_QUERY_REFUSED','METADATA_REFUSED',
-         'TARGET_REFUSED','CGROUP_REFUSED','PROCESS_REFUSED','TCP_REFUSED','DOCKER_UNCONFIRMED',
-         'MYSQL_CANDIDATE_REFUSED','LOCAL_LISTENER_REFUSED','FORWARDING_UNCONFIRMED','PEER_CHANGED',
-         'PHP_PEER_REFUSED','DB_PEER_REFUSED','INTERNAL_REFUSED')
-FD_REASONS=tuple(role+'_'+code for role in ('DB','PHP','PROXY') for code in
-    ('FD_ENTRY_LIMIT','FD_NAME_REFUSED','FD_TARGET_LIMIT','FD_DISAPPEARED','FD_ACCESS_REFUSED','FD_IO_REFUSED'))
+from test_db_runtime_control_contract import STAGES, REASONS, FD_REASONS
 
 
 def reason(error):
@@ -43,7 +36,9 @@ def receive(wire, sequence):
 
 def closed():
     return dict(version=VERSION,status='BLOCKED',stage='CONTEXT',reason='CONTEXT_REQUIRED',
-                configured_runtime='NOT_ESTABLISHED',dependency_trust='INSTALLED_VENDOR_NOT_ATTESTED',
+                configured_runtime='NOT_ESTABLISHED',dependency_trust='INSTALLED_PHP_AND_VENDOR_NOT_ATTESTED',
+                pre_entry='NOT_ESTABLISHED',effective_ini_selection='NOT_ATTESTED',worker_memory='NOT_ATTESTED',
+                fastcgi_state='NOT_SENT',
                 local_peer='NOT_ESTABLISHED',metadata=None,sql='NOT_ATTEMPTED',
                 synthetic_provenance='UNKNOWN',grants='UNKNOWN',egress_isolation='UNKNOWN',
                 arbitrary_request_binding='NOT_ESTABLISHED')
@@ -62,7 +57,7 @@ def dialogue(wire,kernel,worker,publisher,receipt):
     receipt['stage']='SELECT'
     # Set only once authorization is actually sent; never infer GET/query
     # success from an attempted diagnostic or a peer tuple alone.
-    wire.send('ROOT',4,{'stage':'SELECT'});receipt['sql']='AUTHORIZED_NOT_CONFIRMED'
+    receipt['sql']='AUTHORIZED_NOT_CONFIRMED';wire.send('ROOT',4,{'stage':'SELECT'})
     metadata=receive(wire,5)
     if metadata.get('schema_matches') is not True:raise Rejected('METADATA_REFUSED')
     receipt['stage']='PEER_AFTER_SQL'
@@ -86,24 +81,38 @@ def worker_from_peer(snapshot, credentials, kernel, deadline):
 
 
 def collect(context):
+    # Historical private publisher context remains a different scope. Without
+    # the new capsule's fresh staging it cannot start this diagnostic.
+    return _collect(context,context_digest,None,None)
+
+
+def collect_control(context, staging, deadline_ns):
+    return _collect(context,control_context_digest,staging,deadline_ns)
+
+
+def _collect(context,digest_for,staging,deadline_ns):
     receipt=closed();listener=request=connection=None;lock=None
     try:
-        context_digest(context)
+        digest_for(context)
         if sys.platform!='linux' or os.geteuid()!=0:raise Rejected('ROOT_LINUX_REQUIRED')
-        deadline=time.monotonic()+3
+        if not staging_valid(staging) or type(deadline_ns) is not int:raise Rejected('STAGING_VIEW_REFUSED')
+        deadline=min(time.monotonic()+3,deadline_ns/1e9)
+        if deadline<=time.monotonic():raise Rejected('DEADLINE')
         kernel=Kernel(deadline)
         receipt['stage']='FPM_BEFORE';lock=kernel.ns['_manifest_lock'](deadline);snapshot,_=kernel.fpm()
+        receipt['stage']='PRE_ENTRY';ini_before=pre_entry(kernel,snapshot);entry_before=staging_view(staging,kernel,snapshot);receipt['pre_entry']='OBSERVED'
         publisher=pwd.getpwnam('jsm').pw_uid
         if not 0<publisher<=2147483647:raise Rejected('FPM_REFUSED')
         nonce,channel=secrets.token_hex(16),secrets.token_hex(16)
-        digest=context_digest(context)
+        digest=digest_for(context)
         listener=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
         listener.bind('\0jsm-db-2760-'+channel);listener.listen(1)
         receipt['stage']='CHANNEL'
         def fpm_peer(stream):
             pid,uid,gid=struct.unpack('3i',stream.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
             if pid!=snapshot[0]['php']['pid'] or uid!=0:raise Rejected('FPM_REFUSED')
-        request=FastCGI(nonce,digest,channel,deadline,peer_check=fpm_peer)
+        request=FastCGI(nonce,digest,channel,deadline,staging,peer_check=fpm_peer,
+                        on_send=lambda:receipt.update(fastcgi_state='UNCONFIRMED'))
         listener.settimeout(min(.75,max(0,deadline-time.monotonic())))
         connection,_=listener.accept()
         worker=worker_from_peer(snapshot,struct.unpack('3i',connection.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12)),kernel,deadline)
@@ -112,14 +121,24 @@ def collect(context):
         receipt['stage']='FPM_AFTER'
         after,_=kernel.fpm()
         if after!=snapshot:raise Rejected('FPM_REFUSED')
-        receipt['stage']='FASTCGI_END';request.finish()
+        receipt['stage']='PRE_ENTRY'
+        if pre_entry(kernel,after)!=ini_before:raise Rejected('PRE_ENTRY_CHANGED')
+        if staging_view(staging,kernel,after)!=entry_before:raise Rejected('STAGING_VIEW_REFUSED')
+        receipt['stage']='FASTCGI_END';request.finish();receipt['fastcgi_state']='FINISHED'
         kernel.check()
         receipt.update(status='OBSERVED',stage='COMPLETE',reason=None)
     except Exception as error:
         receipt['reason']=reason(error)
         # Metadata never survives a failed final stability/transport check.
-        receipt['metadata']=None;receipt['configured_runtime']='NOT_ESTABLISHED'
+        receipt['metadata']=None;receipt['configured_runtime']='NOT_ESTABLISHED';receipt['pre_entry']='NOT_ESTABLISHED'
     finally:
+        if connection is not None:
+            try:connection.close()
+            except OSError:pass
+        if request is not None:
+            try:request.finish()
+            except Exception:pass
+            if request.done:receipt['fastcgi_state']='FINISHED'
         if lock is not None:
             try:os.close(lock)
             except Exception:receipt.update(status='BLOCKED',reason='CHANNEL_REFUSED',metadata=None,configured_runtime='NOT_ESTABLISHED')

@@ -177,7 +177,7 @@ function applicationShape(array $config, array $extensions): void
         foreach (array_keys($definition) as $key) {
             if (!in_array($key,['class','levels','except','categories','logVars','enabled','prefix','logFile'],true)) { refuse('STARTUP_HOOK_REFUSED'); }
         }
-        if (($definition['logVars'] ?? [])!==[] || (isset($definition['enabled']) && !is_bool($definition['enabled']))
+        if (!array_key_exists('logVars',$definition) || $definition['logVars']!==[] || (isset($definition['enabled']) && !is_bool($definition['enabled']))
             || (array_key_exists('prefix',$definition) && $definition['prefix']!==null)
             || (isset($definition['logFile']) && $definition['logFile']!==APP_ROOT.'/api/runtime/logs/app.log')) { refuse('STARTUP_HOOK_REFUSED'); }
         foreach (['levels','except','categories'] as $key) {
@@ -228,12 +228,17 @@ function configuredApplication(int $publisher)
 
 function loadModels(int $publisher): void
 {
-    if (\Yii::getAlias('@common')!==APP_ROOT.'/common') { refuse('MODEL_SOURCE_REFUSED'); }
     $pins=['Blogs'=>'3a7abf27993e296c812095974c0a5304506a24dff0aab22e4272f35b02766961',
            'Faq'=>'1466ddb683939ceb42cf75a7755cf511357543433588a6ab1317ea96fe969959',
            'FaqGroup'=>'261f583f7a57f889c46ca6b369dc9d4449bf394fed78e80911ee5f768d51ce28'];
+    guardedModels($publisher,APP_ROOT,$pins);
+}
+
+function guardedModels(int $publisher,string $root,array $pins): void
+{
+    if (\Yii::getAlias('@common')!==$root.'/common') { refuse('MODEL_SOURCE_REFUSED'); }
     foreach ($pins as $name=>$expected) {
-        $class='common\\models\\'.$name;$path=APP_ROOT.'/common/models/'.$name.'.php';
+        $class='common\\models\\'.$name;$path=$root.'/common/models/'.$name.'.php';
         if (class_exists($class,false)) { refuse('MODEL_SOURCE_REFUSED'); }
         foreach (spl_autoload_functions() ?: [] as $loader) {
             if (is_array($loader) && is_object($loader[0]) && get_class($loader[0])==='Composer\\Autoload\\ClassLoader') {

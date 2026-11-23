@@ -36,6 +36,30 @@ final class PrivateWire
     }
 }
 
+function rootPeerStatus(string $status,int $pid): bool
+{
+    if ($pid<2 || strlen($status)>4096) { return false; }
+    preg_match_all('/^Pid:[ \t]+([0-9]+)[ \t]*$/m',$status,$pids);
+    preg_match_all('/^Uid:[ \t]+([0-9]+)[ \t]+([0-9]+)[ \t]+([0-9]+)[ \t]+([0-9]+)[ \t]*$/m',$status,$uids);
+    return count($pids[1])===1 && $pids[1][0]===(string)$pid && count($uids[1])===1
+        && $uids[1][0]==='0' && $uids[2][0]==='0' && $uids[3][0]==='0' && $uids[4][0]==='0';
+}
+
+function requireRootPeer($socket): void
+{
+    // Linux PHP7.4's generic getsockopt returns the first int of ucred (PID).
+    // Bind that kernel PID to public proc Uid fields; never infer uid from the
+    // proc directory owner (non-dumpable unprivileged processes can look root).
+    if (PHP_OS_FAMILY!=='Linux') { refuse('CHANNEL_REFUSED'); }
+    $pid=@socket_get_option($socket,SOL_SOCKET,17);
+    if (!is_int($pid) || $pid<2 || $pid>2147483647) { refuse('CHANNEL_REFUSED'); }
+    $fd=@fopen('/proc/'.$pid.'/status','rb');
+    if ($fd===false) { refuse('CHANNEL_REFUSED'); }
+    try {$status=stream_get_contents($fd,4097);}
+    finally {fclose($fd);}
+    if (!is_string($status) || !rootPeerStatus($status,$pid)) { refuse('CHANNEL_REFUSED'); }
+}
+
 function privateEntry(): void
 {
     if (PHP_SAPI!=='fpm-fcgi' || ($_SERVER['JSM_DB_PROBE'] ?? null)!==VERSION
@@ -50,6 +74,7 @@ function privateEntry(): void
     try {
         if (!@socket_set_option($socket,SOL_SOCKET,SO_SNDTIMEO,['sec'=>0,'usec'=>750000])
             || !@socket_connect($socket,"\0jsm-db-2760-".$_SERVER['JSM_DB_CHANNEL'])) { refuse('CHANNEL_REFUSED'); }
+        requireRootPeer($socket);
         $wire=new PrivateWire($socket,$_SERVER['JSM_DB_NONCE'],$_SERVER['JSM_DB_CONTEXT'],hrtime(true)/1e9+3);
         phpDialogue($wire,static function(int $uid) {  $app=configuredApplication($uid);loadModels($uid);return connectionDefinition($app); },
             __NAMESPACE__.'\\nativeConnect',__NAMESPACE__.'\\metadata');

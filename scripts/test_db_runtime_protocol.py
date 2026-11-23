@@ -44,6 +44,13 @@ def context_digest(context):
     return hashlib.sha256(canonical(context)).hexdigest()
 
 
+def control_context_digest(context):
+    """Separate public control profile; never substitute it for PR29 scope."""
+    from test_db_runtime_control_contract import context_valid, digest
+    if not context_valid(context):raise Rejected('CONTEXT_REQUIRED')
+    return digest(context)
+
+
 def _key(nonce):
     if type(nonce) is not str or re.fullmatch('[0-9a-f]{32}', nonce) is None:
         raise Rejected('NONCE_REQUIRED')

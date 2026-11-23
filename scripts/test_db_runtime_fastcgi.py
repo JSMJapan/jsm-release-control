@@ -1,5 +1,5 @@
 """One fixed local FPM request with bounded private response draining."""
-import select
+import re
 import socket
 import struct
 import threading
@@ -7,7 +7,7 @@ import time
 from test_db_runtime_protocol import Rejected, IO_SECONDS, VERSION
 
 SOCKET = '/run/php/php7.4-fpm.sock'
-SCRIPT = '/usr/local/libexec/test_db_runtime_entry.php'
+ENTRY_NAME = 'test_db_runtime_entry.php'
 MAX_RESPONSE = 16384
 
 
@@ -25,9 +25,12 @@ def params(values):
     return result
 
 
-def request_params(nonce,digest,channel):
-    return {'SCRIPT_FILENAME':SCRIPT,'SCRIPT_NAME':'/test_db_runtime_entry.php','PHP_SELF':'/test_db_runtime_entry.php',
-                    'DOCUMENT_ROOT':'/usr/local/libexec','REQUEST_URI':'/test_db_runtime_entry.php','REQUEST_METHOD':'POST','CONTENT_LENGTH':'0','QUERY_STRING':'',
+def request_params(nonce,digest,channel,staging):
+    path=staging.get('path') if type(staging) is dict else None
+    if type(path) is not str or re.fullmatch('/run/jsm-db-2760-[0-9a-f]{32}',path) is None:raise Rejected('STAGING_VIEW_REFUSED')
+    script=path+'/'+ENTRY_NAME
+    return {'SCRIPT_FILENAME':script,'SCRIPT_NAME':'/test_db_runtime_entry.php','PHP_SELF':'/test_db_runtime_entry.php',
+                    'DOCUMENT_ROOT':path,'REQUEST_URI':'/test_db_runtime_entry.php','REQUEST_METHOD':'POST','CONTENT_LENGTH':'0','QUERY_STRING':'',
                     'SERVER_NAME':'develop.jsmjapan.com','SERVER_PROTOCOL':'HTTP/1.1','GATEWAY_INTERFACE':'CGI/1.1',
                     'JSM_DB_PROBE':VERSION,'JSM_DB_NONCE':nonce,'JSM_DB_CONTEXT':digest,'JSM_DB_CHANNEL':channel}
 
@@ -35,7 +38,7 @@ def request_params(nonce,digest,channel):
 
 class FastCGI:
     """Only synthetic tests may supply a preconnected stream; no target input."""
-    def __init__(self, nonce, digest, channel, deadline, stream=None, peer_check=None):
+    def __init__(self, nonce, digest, channel, deadline, staging, stream=None, peer_check=None, on_send=None):
         self.deadline=deadline
         self.stream=stream or socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
         self.error=None;self.done=False
@@ -43,8 +46,9 @@ class FastCGI:
             self._timeout()
             if stream is None:self.stream.connect(SOCKET)
             if peer_check is not None:peer_check(self.stream)
-            values=request_params(nonce,digest,channel)
+            values=request_params(nonce,digest,channel,staging)
             packet=record(1,struct.pack('!HB5x',1,0))+record(4,params(values))+record(4)+record(5)
+            if on_send is not None:on_send()
             self.stream.sendall(packet)
             self.thread=threading.Thread(target=self._drain,daemon=True);self.thread.start()
         except Exception:
@@ -72,7 +76,7 @@ class FastCGI:
                 seen+=length+padding
                 if seen>MAX_RESPONSE:raise Rejected('FASTCGI_REFUSED')
                 content=self._read(length);self._read(padding)
-                if kind==7 and content:raise Rejected('FASTCGI_REFUSED')
+                if kind==7 and content:self.error='FASTCGI_REFUSED'
                 if kind==3:
                     if content!=b'\0'*8:raise Rejected('FASTCGI_REFUSED')
                     self.done=True;return
@@ -87,4 +91,4 @@ class FastCGI:
         try:self.stream.shutdown(socket.SHUT_RDWR)
         except OSError:pass
         self.stream.close()
-        if hasattr(self,'thread'):self.thread.join(IO_SECONDS)
+        if hasattr(self,'thread'):self.thread.join(max(0,min(.05,self.deadline-time.monotonic())))
