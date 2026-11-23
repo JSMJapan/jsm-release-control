@@ -49,12 +49,40 @@ REASONS = ('EXACT_MAIN_APPROVAL_REQUIRED', 'PROTECTED_TEST_OWNER_MAIN_ENVIRONMEN
 
 OBSERVATION = r'''
 import fcntl
+import grp
+import pwd
 from contextlib import ExitStack
 
 _MANIFEST_TRUSTED_UID = 0
 
-def _manifest_trusted(info):
-    return info.st_uid == _MANIFEST_TRUSTED_UID and not info.st_mode & 0o022
+def _manifest_trusted(info, site_owner=None):
+    owner_ok = info.st_uid == _MANIFEST_TRUSTED_UID or (info.st_uid, info.st_gid) == site_owner
+    return owner_ok and not info.st_mode & 0o022
+
+def _site_owner_for_path(parts, depth, site_owner):
+    # The fixed deployer assigns jsm:jsm to the application tree. Never
+    # extend that trust to the parents of /srv/jsm/app or to the deploy lock.
+    return site_owner if depth >= 2 and parts[:4] == ['srv', 'jsm', 'app', 'backend'] else None
+
+def _manifest_site_identity():
+    try:
+        user = pwd.getpwnam('jsm')
+        group = grp.getgrnam('jsm')
+    except KeyError:
+        raise ValueError() from None
+    if not _pid_ready(user.pw_uid) or not _pid_ready(group.gr_gid) or user.pw_gid != group.gr_gid:
+        raise ValueError()
+    return user.pw_uid, group.gr_gid
+
+def _manifest_worker_uid(pid, site_owner, deadline):
+    status = _proc_read('/proc/'+str(pid)+'/status', deadline, 4096)
+    rows = re.findall(r'^Uid:[ \t]+([0-9]+)[ \t]+([0-9]+)[ \t]+([0-9]+)[ \t]+([0-9]+)[ \t]*$', status, re.M)
+    if len(rows) != 1:
+        raise ValueError()
+    ids = tuple(map(int, rows[0]))
+    if any(not _pid_ready(uid) or uid == site_owner[0] for uid in ids):
+        raise ValueError()
+    return ids
 
 def _manifest_stamp(info):
     return _stamp(info) + (info.st_size, info.st_mtime_ns)
@@ -110,16 +138,18 @@ def _manifest_snapshot(deadline):
         raise ValueError()
     # Follow the filesystem view only when all workers belong to the same
     # master, namespace and root. Do not choose between different roots.
+    site_owner = _manifest_site_identity()
     workers = []
     for worker in sorted(set(map(int, children))):
         identity = _php_endpoint_identity(worker, deadline)
         if identity[1] != master or identity[2:] != master_identity[2:] or identity[0] < master_identity[0]:
             raise ValueError()
+        worker_ids = _manifest_worker_uid(worker, site_owner, deadline)
         if listener in _fd_sockets(worker, deadline):
-            workers.append((worker, identity))
+            workers.append((worker, identity, worker_ids))
     if not workers:
         raise ValueError()
-    return (units, master_identity, listener, tuple(workers)), workers[0][0]
+    return (units, master_identity, listener, tuple(workers), site_owner), workers[0][0]
 
 def _manifest_root(snapshot, pid, deadline):
     fds, name = _parents('/proc/'+str(pid)+'/root', deadline)
@@ -143,7 +173,7 @@ def _manifest_root(snapshot, pid, deadline):
         for parent in reversed(fds):
             os.close(parent)
 
-def _manifest_probe(root, rule, deadline):
+def _manifest_probe(root, rule, deadline, site_owner=None):
     relative, size, expected = rule
     components = relative.split('/')
     with ExitStack() as stack:
@@ -151,12 +181,12 @@ def _manifest_probe(root, rule, deadline):
         parent = root
         if not _manifest_trusted(os.fstat(root)):
             raise ValueError()
-        for name in components[:-1]:
+        for depth, name in enumerate(components[:-1]):
             _check(deadline)
             fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
             stack.callback(os.close, fd)
             info = os.fstat(fd)
-            if not _manifest_trusted(info):
+            if not _manifest_trusted(info, _site_owner_for_path(components, depth, site_owner)):
                 raise ValueError()
             chain.append((parent, name, fd, _manifest_stamp(info)))
             parent = fd
@@ -164,7 +194,8 @@ def _manifest_probe(root, rule, deadline):
         held = os.open(name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
         stack.callback(os.close, held)
         info = os.fstat(held)
-        if not stat.S_ISREG(info.st_mode) or not _manifest_trusted(info) or info.st_nlink != 1:
+        expected_owner = _site_owner_for_path(components, len(components)-1, site_owner)
+        if not stat.S_ISREG(info.st_mode) or not _manifest_trusted(info, expected_owner) or info.st_nlink != 1:
             raise ValueError()
         stamp = _manifest_stamp(info)
         matched = False
@@ -194,12 +225,12 @@ def _manifest_probe(root, rule, deadline):
                 raise ValueError()
         return ('MATCH' if matched else 'MISMATCH'), stamp, tuple(item[3] for item in chain)
 
-def _manifest_read_files(root, deadline):
+def _manifest_read_files(root, deadline, site_owner):
     files = {}
     for role,(relative,size,expected) in MANIFEST.items():
         rule = ('srv/jsm/app/backend/'+relative, size, expected)
         try:
-            files[role] = _manifest_probe(root, rule, deadline)
+            files[role] = _manifest_probe(root, rule, deadline, site_owner)
         except (OSError, ValueError, AttributeError):
             files[role] = ('UNKNOWN',)
     return files
@@ -218,9 +249,9 @@ def _read_php_manifest(nonce):
             before, pid = _manifest_snapshot(deadline)
             root = _manifest_root(before, pid, deadline)
             stack.callback(os.close, root)
-            first = _manifest_read_files(root, deadline)
+            first = _manifest_read_files(root, deadline, before[4])
             peer = _observe_php_endpoint(before[0], before[0], min(deadline,time.monotonic()+.55))
-            second = _manifest_read_files(root, deadline)
+            second = _manifest_read_files(root, deadline, before[4])
             after, after_pid = _manifest_snapshot(deadline)
             _check(deadline)
             if before != after or pid != after_pid or first != second:
