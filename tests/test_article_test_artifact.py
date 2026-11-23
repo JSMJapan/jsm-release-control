@@ -10,7 +10,7 @@ import unittest
 from zipfile import ZipFile,ZipInfo,ZIP_STORED
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
-from article_test_artifact import Build, ArtifactRefused, inspect_archive, MEMBERS
+from article_test_artifact import Build, ArtifactRefused, inspect_archive, extract_metadata, MEMBERS
 
 
 class ArtifactTests(unittest.TestCase):
@@ -37,6 +37,18 @@ class ArtifactTests(unittest.TestCase):
             self.assertEqual(set(got.members),set(MEMBERS));self.assertEqual(got.app_image,'sha256:'+'b'*64)
             self.assertEqual(got.source_sha,'0184fcbc7bdbb0ca18da842532297bd12f3b557b')
             self.assertEqual(got.image_archive_bytes,len(b'synthetic compressed images'))
+
+    def test_extraction_reopens_nofollow_rechecks_digest_and_never_overwrites(self):
+        raw,build=self.package()
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);path=root/'a.zip';path.write_bytes(raw);output=root/'metadata';output.mkdir()
+            inspected=inspect_archive(path,build);extract_metadata(path,output,inspected)
+            self.assertEqual({p.name for p in output.iterdir()},set(MEMBERS)-{'images.tar.gz','SHA256SUMS'})
+            with self.assertRaises(ArtifactRefused):extract_metadata(path,output,inspected)
+            other=root/'other.zip';other.write_bytes(raw);path.unlink();path.symlink_to(other)
+            with self.assertRaises(ArtifactRefused):extract_metadata(path,output,inspected)
+            path.unlink();path.write_bytes(raw+b'CANARY-SWAPPED')
+            with self.assertRaises(ArtifactRefused):extract_metadata(path,output,inspected)
 
     def test_changed_source_build_proof_hash_and_member_refuse(self):
         mutations=[lambda r:r.update({'build-commit':b'd'*40+b'\n'}),lambda r:r.update({'acceptance.json':b'{}'}),

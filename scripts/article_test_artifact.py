@@ -3,6 +3,7 @@
 An independently authenticated GitHub run/artifact digest is the trust anchor.
 The internal checksums are integrity checks, not source authorization.
 """
+from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 import json
@@ -145,16 +146,30 @@ def inspect_archive(path,build):
 
 
 def extract_metadata(path,output,inspected):
-    """Only seven small reviewed names; never extract the Docker TAR on host."""
-    names=set(MEMBERS)-{'images.tar.gz','SHA256SUMS'}
+    """Revalidate the current no-follow FD; bound before any small-member read."""
     if type(inspected) is not Inspected:refuse()
-    directory=os.open(output,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+    directory=None
     try:
-        with ZipFile(path) as archive:
-            for name in sorted(names):
-                raw=archive.read(name)
-                if len(raw)>METADATA_LIMIT or sha256(raw).hexdigest()!=inspected.members[name]['sha256']:refuse()
-                fd=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=directory)
-                with os.fdopen(fd,'wb') as target:target.write(raw)
-    except (OSError,ValueError,BadZipFile):raise ArtifactRefused('ARTICLE_ARTIFACT_REFUSED') from None
-    finally:os.close(directory)
+        source=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+        with os.fdopen(source,'rb') as file:
+            before=os.fstat(file.fileno())
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1:refuse()
+            # A saved Inspected value does not authenticate a replaced pathname.
+            current=_inspect(file,inspected.build)
+            if current!=inspected:refuse()
+            directory=os.open(output,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+            with ZipFile(file) as archive:
+                for name in sorted(set(MEMBERS)-{'images.tar.gz','SHA256SUMS'}):
+                    info=archive.getinfo(name)
+                    if not 0<info.file_size<=METADATA_LIMIT:refuse()
+                    with archive.open(info) as member:raw=member.read(METADATA_LIMIT+1)
+                    if (len(raw)!=info.file_size or len(raw)>METADATA_LIMIT
+                            or sha256(raw).hexdigest()!=current.members[name]['sha256']):refuse()
+                    fd=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=directory)
+                    with os.fdopen(fd,'wb') as target:target.write(raw)
+            if (file_stamp(before)!=file_stamp(os.fstat(file.fileno()))
+                    or file_stamp(before)!=file_stamp(os.stat(path,follow_symlinks=False))):refuse()
+    except (OSError,ValueError,TypeError,BadZipFile,RuntimeError):
+        raise ArtifactRefused('ARTICLE_ARTIFACT_REFUSED') from None
+    finally:
+        if directory is not None:os.close(directory)

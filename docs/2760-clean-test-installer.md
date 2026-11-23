@@ -6,7 +6,9 @@ This is a separate candidate from unmerged/unselected PR35. Source baseline publ
 
 First implemented slice verifies an independently authenticated private Actions ZIP digest, exact nine-member inventory, all internal SHA256, reviewed source0184/treeb43, native CI acceptance, build SHA and two image IDs. Internal acceptance/checksums are not a trust anchor. No private app/SQL/image payload is committed to this public repo; tests use unrelated synthetic bytes.
 
-Next in this same candidate: fixed authenticated GitHub artifact delivery without forwarding token on storage redirect; bounded new streaming write capsule; safe Docker-save envelope and image tag collision refusal; create only new synthetic-only DB/app objects in network:none plus the same exact netns; fixed resource limits and own-ID cleanup/2h TTL. No bridge, shared TEST DB, production/provider access, existing Telegram/messages or public ingress changes.
+Implemented next slice: fixed authenticated GitHub run/job/native-step/artifact binding, one storage redirect without Authorization, native slow-header deadline fixture, Docker-save legacy/OCI envelope/config/layer-diffID validation without host extraction. Actual producer ZIP/Docker format remains NOT_TESTED until the successful private CI artifact exists.
+
+Remaining in this same candidate: bounded new streaming write capsule; safe Docker-save envelope and image tag collision refusal; create only new synthetic-only DB/app objects in network:none plus the same exact netns; fixed resource limits and own-ID cleanup/2h TTL. No bridge, shared TEST DB, production/provider access, existing Telegram/messages or public ingress changes.
 
 Proposed bounds: ZIP≤2GiB, decompressed Docker TAR≤6GiB, metadata32KiB, resources app+DB each768MiB/128PIDs/0.5CPU with memory-swap=memory and bounded logs; data tmpfs512MiB, app temp64MiB. Disk admission must use measured archive/layer size plus reserve, not a blind8GiB threshold. New finite stage timeout is separate from unchanged read-only profiles. Exact values and complete implementation require review before any run.
 
