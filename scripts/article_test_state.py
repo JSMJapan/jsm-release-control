@@ -36,7 +36,7 @@ def valid_run(run):return type(run) is str and re.fullmatch('[0-9a-f]{12}',run) 
 
 def record_valid(value,run):
     keys={'version','run','control_sha','build_sha','artifact_sha256','bundle_sha256','schema_sha256','seed_sha256',
-          'images','tags','containers','created','expires','timer','timer_armed','import_started','import_complete'}
+          'images','tags','containers','create_attempted','created','expires','timer','timer_armed','import_started','import_complete'}
     if type(value) is not dict or set(value)!=keys or value.get('version')!=VERSION or value.get('run')!=run or not valid_run(run):return False
     for key in ('control_sha','build_sha'):
         if type(value.get(key)) is not str or re.fullmatch('[0-9a-f]{40}',value[key]) is None:return False
@@ -46,6 +46,8 @@ def record_valid(value,run):
     if value.get('tags')!=['jsm-article-test:'+value['build_sha'],'jsm-article-mysql:'+value['build_sha']]:return False
     if type(value.get('containers')) is not dict or set(value['containers'])!={'db','app'}:return False
     if any(x is not None and (type(x) is not str or re.fullmatch('[0-9a-f]{64}',x) is None) for x in value['containers'].values()):return False
+    if type(value.get('create_attempted')) is not dict or set(value['create_attempted'])!={'db','app'} or any(type(x) is not bool for x in value['create_attempted'].values()):return False
+    if any(value['containers'][role] is not None and not value['create_attempted'][role] for role in ('db','app')):return False
     return (type(value.get('created')) is int and type(value.get('expires')) is int
             and value['expires']==value['created']+TTL and value.get('timer')=='jsm-article-2760-expire-'+run
             and type(value.get('timer_armed')) is bool and type(value.get('import_started')) is bool
@@ -64,6 +66,8 @@ class Store:
             if create:os.mkdir(run,0o700,dir_fd=parent)
             self.fd=os.open(run,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=parent)
             require(trusted(os.fstat(self.fd),stat.S_IFDIR) and stat.S_IMODE(os.fstat(self.fd).st_mode)==0o700)
+        except BaseException:
+            self.close();raise
         finally:os.close(parent)
         flags=os.O_RDWR|os.O_NOFOLLOW|os.O_CLOEXEC|(os.O_CREAT|os.O_EXCL if create else 0)
         try:

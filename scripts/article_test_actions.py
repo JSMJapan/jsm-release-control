@@ -8,7 +8,7 @@ import time
 from urllib.parse import urlsplit
 
 from apache_parity_bridge import _GitHubGet, Refused, strict_json
-from test_installer_capture_encrypted import GH_REPO, GH_ENV
+from test_api_readonly_access import GH_REPO, GH_ENV
 from hostinger_preflight import policy_ready
 from article_test_artifact import Build, ARCHIVE_LIMIT
 
@@ -107,7 +107,7 @@ def _authorize_artifact(api,build):
                     for k in ('repository','head_repository')),'PRIVATE_ARTIFACT_SCOPE_REFUSED')
     required_steps=('Check out the reviewed package source','Check out the fixed article candidate',
         'Prepare reviewed sources and separate schema and seed','Build only the disposable article image',
-        'Run native MySQL and article HTTP acceptance without external networking',
+        'Run native MySQL, article HTTP and Chromium acceptance without external networking',
         'Create a checksummed offline deployment artifact','Upload the verified isolated package to private GitHub Actions')
     require(type(jobs) is dict and jobs.get('total_count')==1 and type(jobs.get('total_count')) is int
             and type(jobs.get('jobs')) is list and len(jobs['jobs'])==1,'PRIVATE_ARTIFACT_SCOPE_REFUSED')

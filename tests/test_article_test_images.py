@@ -85,6 +85,12 @@ class ImagesTests(unittest.TestCase):
             raw,build=envelope(change=mutate)
             with self.assertRaises(images.ImageRefused):self.verify(raw,build)
 
+    def test_oci_compressed_blob_digest_is_independent_of_unpacked_diffid(self):
+        def gzip_header(rows,manifest,ids):
+            path=manifest[0]['Layers'][0];raw=bytearray(rows[path]);raw[4]^=1;rows[path]=bytes(raw)
+        raw,build=envelope(oci=True,change=gzip_header)
+        with self.assertRaises(images.ImageRefused):self.verify(raw,build)
+
     def test_outer_symlink_device_traversal_duplicate_refuse_without_host_extract(self):
         def entry(kind,name):
             def add(archive):

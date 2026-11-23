@@ -210,18 +210,22 @@ def _verify(path,inspected,deadline):
     with image_tar(path,inspected,deadline) as (tar,_):
         for entry in tar:
             if entry.name not in references:continue
-            file=tar.extractfile(entry);start=file.read(2)
+            file=tar.extractfile(entry);start=file.read(2);stored=sha256(start);stored_bytes=len(start)
             class Prefix:
                 def __init__(self):self.prefix=start
                 def read(self,n=-1):
+                    nonlocal stored_bytes
                     part=self.prefix[:n] if n>=0 else self.prefix;self.prefix=self.prefix[len(part):]
-                    return part+file.read(n-len(part) if n>=0 else n)
+                    tail=file.read(n-len(part) if n>=0 else n);stored.update(tail);stored_bytes+=len(tail)
+                    return part+tail
             stream=Prefix();wrapped=gzip.GzipFile(fileobj=stream,mode='rb') if start==b'\x1f\x8b' else stream
             digest=sha256();total=0
             while True:
                 check(deadline);raw=wrapped.read(min(65536,TAR_LIMIT+1-total))
                 if not raw:break
                 total+=len(raw);require(total<=TAR_LIMIT);digest.update(raw)
+            require(stored_bytes==entry.size)
+            if entry.name.startswith('blobs/sha256/'):require(stored.hexdigest()==entry.name.rsplit('/',1)[1])
             require('sha256:'+digest.hexdigest()==references[entry.name]);sizes[entry.name]=total
     require(set(sizes)==set(references))
     unpacked=sum(sizes[path] for _,layers in by_tag.values() for path in layers)

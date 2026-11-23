@@ -32,6 +32,10 @@ def require(ok,reason='ARTICLE_HOST_REFUSED'):
 def until(deadline):require(time.monotonic()<deadline,'ARTICLE_STAGE_DEADLINE')
 
 
+def owned_directory(info,ingress):
+    return stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode)==0o700 and info.st_uid==(10001 if ingress else 0)
+
+
 def mount(source,target,readonly=True):
     return 'type=bind,source='+str(source)+',target='+target+(',readonly' if readonly else '')
 
@@ -162,7 +166,7 @@ def initialize(docker,store,state,password):
 
 def create_role(docker,store,state,role):
     # Persistent intent precedes Docker create. Recovery resolves only this exact name+label+image.
-    store.save(state)
+    state['create_attempted'][role]=True;store.save(state)
     name='jsm-article-2760-'+role+'-'+store.run
     args=('--name',name,'--label',LABEL+'='+store.run,'--pull','never','--ipc','private',*LIMITS)
     if role=='db':
@@ -182,16 +186,23 @@ def create_role(docker,store,state,role):
 
 def cleanup(store,state,docker,deadline):
     """Never prune or delete by a global label filter. Recover only pre-recorded exact names."""
+    require(docker is not None or not state['import_started'] and not any(state['create_attempted'].values()) and all(x is None for x in state['containers'].values()),'ARTICLE_CLEANUP_UNCONFIRMED')
+    deadline=min(deadline,time.monotonic()+90)
+    if docker is not None:docker.deadline=deadline
     failures=[]
     for role in ('app','db'):
         try:
             identity=state['containers'][role]
-            if identity is None:
+            if identity is None and state['create_attempted'][role]:
                 name='jsm-article-2760-'+role+'-'+store.run
                 rows=docker.run(('container','ls','--all','--quiet','--no-trunc','--filter','name=^'+name+'$'),limit=256).decode('ascii').splitlines()
                 require(len(rows)<=1 and all(ID.fullmatch(row) for row in rows))
                 identity=rows[0] if rows else None
             if identity is not None:
+                present=docker.run(('container','ls','--all','--quiet','--no-trunc','--filter','id='+identity),limit=256).decode('ascii').splitlines()
+                require(present in ([],[identity]),'ARTICLE_CLEANUP_UNCONFIRMED')
+                if not present:
+                    state['containers'][role]=None;store.save(state);continue
                 docker.observe(identity,store.run,state['images'][0 if role=='app' else 1])
                 docker.run(('rm','--force',identity),seconds=20,limit=256)
                 # ID-only readback; failure is not treated as absence.
@@ -209,29 +220,40 @@ def cleanup(store,state,docker,deadline):
                     require(docker.image_id(tag) is None,'ARTICLE_CLEANUP_UNCONFIRMED')
             except Exception:failures.append('image')
     if failures:raise HostRefused('ARTICLE_CLEANUP_UNCONFIRMED')
-    # Stop only our timer; no unrelated service/unit changes.
-    if state['timer_armed']:
-        command(('/usr/bin/systemctl','stop',state['timer']+'.timer'),deadline)
-    for name in os.listdir(store.fd):
+    # Validate the complete deletion set before stopping expiry or deleting recovery controls.
+    names=os.listdir(store.fd)
+    for name in names:
         require(name in FILES or name in ('ingress','docker-config'),'ARTICLE_CLEANUP_UNCONFIRMED')
         if name in ('ingress','docker-config'):
             directory=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=store.fd)
             try:
+                info=os.fstat(directory)
+                require(owned_directory(info,name=='ingress'))
                 entries=os.listdir(directory)
                 if name=='ingress':
                     require(set(entries)<= {'http.sock'})
                     if entries:
                         info=os.stat('http.sock',dir_fd=directory,follow_symlinks=False)
                         require(stat.S_ISSOCK(info.st_mode) and info.st_uid==10001)
-                        os.unlink('http.sock',dir_fd=directory)
                 else:require(entries==[])
             finally:os.close(directory)
-            os.rmdir(name,dir_fd=store.fd)
         else:
             info=os.stat(name,dir_fd=store.fd,follow_symlinks=False)
             require(stat.S_ISREG(info.st_mode) and info.st_uid==0 and info.st_nlink==1 and not info.st_mode&0o022)
-            if name!='lock':os.unlink(name,dir_fd=store.fd)
-    os.unlink('lock',dir_fd=store.fd)
+    # Keep state+bundle+lock and active TTL if any data deletion or timer stop fails.
+    for name in names:
+        if name in ('state.json','bundle.pyz','lock'):continue
+        if name in ('ingress','docker-config'):
+            directory=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=store.fd)
+            try:
+                if name=='ingress' and 'http.sock' in os.listdir(directory):os.unlink('http.sock',dir_fd=directory)
+            finally:os.close(directory)
+            os.rmdir(name,dir_fd=store.fd)
+        else:os.unlink(name,dir_fd=store.fd)
+    if state['timer_armed']:
+        command(('/usr/bin/systemctl','stop',state['timer']+'.timer'),deadline)
+    for name in ('state.json','bundle.pyz','lock'):
+        if name in names:os.unlink(name,dir_fd=store.fd)
     os.rmdir(store.path)
     return {'status':'CLEANED','run':store.run,'containers_removed':True,'owned_tags_removed':True}
 
@@ -245,11 +267,12 @@ def stage(store,build,control_sha,bundle,deadline,docker_type=Docker):
     state=dict(version=VERSION,run=store.run,control_sha=control_sha,build_sha=build.sha,
         artifact_sha256=build.archive_sha256,bundle_sha256=sha256(bundle).hexdigest(),schema_sha256=inspected.schema_sha256,
         seed_sha256=inspected.seed_sha256,images=[inspected.app_image,inspected.mysql_image],tags=list(build.tags),
-        containers={'db':None,'app':None},created=now,expires=now+TTL,timer='jsm-article-2760-expire-'+store.run,
+        containers={'db':None,'app':None},create_attempted={'db':False,'app':False},created=now,expires=now+TTL,timer='jsm-article-2760-expire-'+store.run,
         timer_armed=False,import_started=False,import_complete=False)
     store.save(state);store.write('bundle.pyz',bundle,0o444)
-    docker=docker_type(store.path,deadline)
+    docker=None
     try:
+        docker=docker_type(store.path,deadline)
         resource_admission(store,archive.stat().st_size,proof,docker)
         docker.absent(store.run,build.tags)
         extract_metadata(archive,store.path,inspected)
@@ -274,6 +297,9 @@ def stage(store,build,control_sha,bundle,deadline,docker_type=Docker):
                     artifact_sha256=build.archive_sha256,app_image=state['images'][0],mysql_image=state['images'][1],
                     ingress='PRIVATE_UNIX_ONLY',qa='NOT_TESTED',local_smoke=smoke_result)
     except BaseException:
-        try:cleanup(store,state,docker,min(deadline+90,time.monotonic()+90))
+        try:
+            reserve=min(deadline+90,time.monotonic()+90)
+            if docker is not None:docker.deadline=reserve
+            cleanup(store,state,docker,reserve)
         except Exception:raise HostRefused('ARTICLE_CLEANUP_UNCONFIRMED') from None
         raise

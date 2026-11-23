@@ -25,7 +25,7 @@ def artifact_api(build,size):
         status='completed',conclusion='success',run_attempt=1,repository=repo,head_repository=repo)
     names=('Check out the reviewed package source','Check out the fixed article candidate',
         'Prepare reviewed sources and separate schema and seed','Build only the disposable article image',
-        'Run native MySQL and article HTTP acceptance without external networking',
+        'Run native MySQL, article HTTP and Chromium acceptance without external networking',
         'Create a checksummed offline deployment artifact','Upload the verified isolated package to private GitHub Actions')
     job=dict(name='package',status='completed',conclusion='success',head_sha=build.sha,run_id=int(build.run_id),
         steps=[dict(name=name,number=n,status='completed',conclusion='success') for n,name in enumerate(names,1)])

@@ -17,7 +17,7 @@ import article_test_state as s
 def record(run):
     return dict(version=s.VERSION,run=run,control_sha='a'*40,build_sha='b'*40,artifact_sha256='c'*64,
         bundle_sha256='d'*64,schema_sha256='e'*64,seed_sha256='f'*64,images=['sha256:'+'a'*64,'sha256:'+'b'*64],
-        tags=['jsm-article-test:'+'b'*40,'jsm-article-mysql:'+'b'*40],containers={'db':None,'app':None},created=10,
+        tags=['jsm-article-test:'+'b'*40,'jsm-article-mysql:'+'b'*40],containers={'db':None,'app':None},create_attempted={'db':False,'app':False},created=10,
         expires=10+s.TTL,timer='jsm-article-2760-expire-'+run,timer_armed=False,import_started=False,import_complete=False)
 
 

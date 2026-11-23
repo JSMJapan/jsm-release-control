@@ -34,7 +34,11 @@ FORMAT='{'+','.join('"'+k+'":{{json '+v+'}}' for k,v in FIELDS.items())+'}'
 class Docker:
     def __init__(self,directory,deadline):
         self.directory,self.deadline=Path(directory),deadline
-        self.config=self.directory/'docker-config';self.config.mkdir(mode=0o700,exist_ok=False)
+        self.config=self.directory/'docker-config'
+        try:self.config.mkdir(mode=0o700,exist_ok=False)
+        except FileExistsError:
+            info=os.stat(self.config,follow_symlinks=False)
+            require(stat.S_ISDIR(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o700 and os.listdir(self.config)==[])
         info=os.stat('/usr/bin/docker',follow_symlinks=False)
         require(stat.S_ISREG(info.st_mode) and info.st_uid==0 and not info.st_mode&0o022)
 

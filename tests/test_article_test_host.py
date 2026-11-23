@@ -1,5 +1,6 @@
 """Whole finite lifecycle with real ZIP/TAR validation and a simulated local Engine."""
 from copy import deepcopy
+from contextlib import contextmanager
 from hashlib import sha256
 import os
 from pathlib import Path
@@ -72,22 +73,38 @@ class Engine:
         return b''
 
 
+@contextmanager
+def fixture_cleanup():
+    original=h.os.stat
+    def owner(*args,**kwargs):
+        value=original(*args,**kwargs)
+        class Info:
+            def __getattr__(self,name):return getattr(value,name)
+            st_uid=0
+        return Info()
+    with patch.object(h,'command',return_value=b'') as commands,patch.object(h,'owned_directory',return_value=True),patch.object(h.os,'stat',side_effect=owner):
+        yield commands
+
+
 class HostTests(unittest.TestCase):
-    def scenario(self,mutate=None,smoke_failure=False):
+    def scenario(self,mutate=None,smoke_failure=False,engine_type=None):
         raw,build=envelope();temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
         owner=patch.object(s,'ROOT_UID',os.getuid());owner.start();self.addCleanup(owner.stop)
-        store=s.Store('a'*12,Path(temporary.name)/'state',create=True);self.addCleanup(store.close)
+        store=s.Store('a'*12,Path(temporary.name)/'state',create=True);self.last_store=store;self.addCleanup(store.close)
         store.write('artifact.zip',raw)
         inspected=h.inspect_archive(store.path/'artifact.zip',build)
         Engine.images=(inspected.app_image,inspected.mysql_image)
         def arm(store,state,deadline):state['timer_armed']=True;store.save(state)
         ns=lambda pid:'net:[20]' if pid in (101,102) else 'net:[10]'
-        engine=Engine
+        engine=engine_type or Engine
         if mutate:
             class Bad(Engine):
                 def observe(self,*args):return mutate(super().observe(*args))
             engine=Bad
-        with patch.object(h.os,'geteuid',return_value=0),patch.object(h.os,'chown'),patch.object(h,'resource_admission'),\
+        actual_cleanup=h.cleanup
+        def recover(*args):
+            with fixture_cleanup():return actual_cleanup(*args)
+        with patch.object(h,'cleanup',side_effect=recover),patch.object(h.os,'geteuid',return_value=0),patch.object(h.os,'chown'),patch.object(h,'resource_admission'),\
              patch.object(h,'timer',side_effect=arm),patch.object(h,'namespace',side_effect=ns),\
              patch.object(h,'command',return_value=b''),patch.object(smoke,'verify',side_effect=RuntimeError('PRIVATE-CANARY') if smoke_failure else None,return_value={'articles':5}):
             result=h.stage(store,build,'f'*40,b'synthetic-public-code',time.monotonic()+2,engine)
@@ -111,18 +128,48 @@ class HostTests(unittest.TestCase):
     def test_cleanup_recovery_resolves_intent_name_before_lost_id_save(self):
         store,_=self.scenario();state=store.read();state['containers']['app']=None;store.save(state)
         engine=Engine.latest
-        with patch.object(h,'command',return_value=b''),patch.object(h.os,'getuid',return_value=0):
-            # Fixture ownership is checked by the same predicate with an explicit local UID seam.
-            original=h.os.stat
-            def stat_owner(*args,**kwargs):
-                value=original(*args,**kwargs)
-                class Info:
-                    def __getattr__(self,name):return getattr(value,name)
-                    st_uid=0
-                return Info()
-            with patch.object(h.os,'stat',side_effect=stat_owner):
-                result=h.cleanup(store,state,engine,time.monotonic()+2)
+        with fixture_cleanup():result=h.cleanup(store,state,engine,time.monotonic()+2)
         self.assertEqual(result['status'],'CLEANED');self.assertFalse(store.path.exists())
         self.assertEqual(engine.rows,{})
+
+    def test_no_create_intent_never_resolves_or_deletes_preexisting_container(self):
+        store,_=self.scenario();engine=Engine.latest;state=store.read()
+        state['containers']={'db':None,'app':None};state['create_attempted']={'db':False,'app':False}
+        state['import_started']=False;state['import_complete']=False;store.save(state)
+        before=len(engine.calls)
+        with fixture_cleanup():h.cleanup(store,state,engine,time.monotonic()+2)
+        self.assertEqual(set(engine.rows),{'d'*64,'e'*64})
+        self.assertFalse(any(call[0] in ('rm','container') for call in engine.calls[before:]))
+
+    def test_rm_before_state_save_crash_is_idempotently_absent(self):
+        store,_=self.scenario();engine=Engine.latest;state=store.read();engine.rows={}
+        with fixture_cleanup():result=h.cleanup(store,state,engine,time.monotonic()+2)
+        self.assertEqual(result['status'],'CLEANED')
+
+    def test_cleanup_preflight_keeps_state_bundle_and_timer_on_unknown_content(self):
+        store,_=self.scenario();state=store.read();config=store.path/'docker-config';config.mkdir(mode=0o700)
+        (config/'unexpected').write_bytes(b'CANARY-PRIVATE')
+        with fixture_cleanup() as commands:
+            with self.assertRaises(h.HostRefused):h.cleanup(store,state,Engine.latest,time.monotonic()+2)
+            self.assertFalse(commands.called)
+        self.assertTrue((store.path/'state.json').exists());self.assertTrue((store.path/'bundle.pyz').exists())
+        self.assertTrue((store.path/'root.password').exists());self.assertTrue(store.read()['timer_armed'])
+
+    def test_constructor_refusal_cleans_pre_resource_directory(self):
+        class Broken(Engine):
+            def __init__(self,*args):raise h.HostRefused('ARTICLE_DOCKER_REFUSED')
+        with self.assertRaisesRegex(h.HostRefused,'ARTICLE_DOCKER_REFUSED'):self.scenario(engine_type=Broken)
+        self.assertFalse(self.last_store.path.exists())
+
+    def test_expired_stage_runner_uses_independent_cleanup_budget(self):
+        class Expired(Engine):
+            def create(self,args):
+                if '--read-only' in args:
+                    self.deadline=time.monotonic()-1;raise DockerRefused('ARTICLE_STAGE_DEADLINE')
+                return super().create(args)
+            def run(self,args,**kwargs):
+                h.until(self.deadline);return super().run(args,**kwargs)
+        with self.assertRaisesRegex(DockerRefused,'ARTICLE_STAGE_DEADLINE'):self.scenario(engine_type=Expired)
+        self.assertEqual(Engine.latest.rows,{})
 
 if __name__=='__main__':unittest.main()
