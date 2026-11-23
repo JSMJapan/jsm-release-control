@@ -1,0 +1,16 @@
+{
+  "request": {
+    "source_url": "https://github.com/yiisoft/yii2-framework/blob/b900eecdb225041a4c4e0f5e0e5336f606a23bdb/web/Request.php",
+    "blob_sha1": "53a76f689d7d66c3171a25873fa79f7d9ce772aa",
+    "source_sha256": "23243a9fcdda964be5e05c26a89fbcd20b5d175b97c0300d0b18f574e75a07c2",
+    "fixture_file": "runtime_yii_request_methods.php",
+    "fixture_sha256": "73458d3b1df0ac59ee5986497e8785fe9888782be68dfec52d46fb17492d0364"
+  },
+  "dispatcher": {
+    "source_url": "https://github.com/yiisoft/yii2-framework/blob/b900eecdb225041a4c4e0f5e0e5336f606a23bdb/log/Dispatcher.php",
+    "blob_sha1": "9dd81fa16325941628b3bf60ca08a6c5215a2cf6",
+    "source_sha256": "10843039007b8728d98bcba992e0196b56b03016c2e377656b071f4f9d201165",
+    "fixture_file": "runtime_yii_dispatcher.php",
+    "fixture_sha256": "10843039007b8728d98bcba992e0196b56b03016c2e377656b071f4f9d201165"
+  }
+}

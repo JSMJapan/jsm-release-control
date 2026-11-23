@@ -39,11 +39,10 @@ class InitProfileTests(unittest.TestCase):
                 if state['target_size'] is not None and int(name)==129:return 'X'*state['target_size']
                 position=listener_at[pid] if type(listener_at)is dict else listener_at
                 return 'socket:[7003]' if int(name)==position and not state['missing'] else 'anon_inode:[PRIVATE]'
-            with patch.dict(self.ns,{'_parents':parents,'_check':checked}), \
-                    patch.object(self.ns['os'],'open',return_value=42), \
-                    patch.object(self.ns['os'],'scandir',return_value=Entries(state['counts'][pid])), \
-                    patch.object(self.ns['os'],'readlink',side_effect=link), \
-                    patch.object(self.ns['os'],'close',side_effect=closed.append):
+            os_values={name:getattr(self.ns['os'],name) for name in ('O_RDONLY','O_DIRECTORY','O_NOFOLLOW')}
+            fake_os=SimpleNamespace(**os_values,open=lambda *args,**kwargs:42,
+                scandir=lambda fd:Entries(state['counts'][pid]),readlink=link,close=closed.append)
+            with patch.dict(self.ns,{'_parents':parents,'_check':checked,'os':fake_os}):
                 return self.actual(pid,deadline,init_binding=True) if init_binding else self.actual(pid,deadline)
         self.ns['_fd_sockets']=read
         return state,reads,scans,closed
