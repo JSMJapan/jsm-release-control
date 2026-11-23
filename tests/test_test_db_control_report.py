@@ -1,12 +1,19 @@
+import base64
+import bz2
+from contextlib import ExitStack, contextmanager
 import copy
+from hashlib import sha256
+import io
 import json
 from pathlib import Path
+import os
 import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import test_db_control_report as control
@@ -26,7 +33,14 @@ PRODUCER_SOURCE = 'test_db_runtime_producer.py'
 def write_fixture_sources(root):
     for source in control.PYTHON_FILES + control.PHP_FILES:
         (root / source).write_text('# ' + source + '\n')
-    (root / PRODUCER_SOURCE).write_text('def collect_control(context):\n    return {}\n')
+    (root / PRODUCER_SOURCE).write_text('def collect_control(context, staging, deadline_ns):\n    return {}\n')
+
+
+
+def blocked_report(state='NOT_SENT'):
+    return dict(status='BLOCKED', stage='CONTEXT', reason='CONTEXT_REQUIRED',
+                local_peer='NOT_ESTABLISHED', configured_runtime='NOT_ESTABLISHED',
+                sql='NOT_ATTEMPTED', metadata=None, fastcgi_state=state)
 
 
 class Api:
@@ -115,10 +129,10 @@ class ControlLaunchTests(unittest.TestCase):
             a=control.build_package(root)
             b=control.build_package(root)
             self.assertEqual(a,b)
-            self.assertEqual(len(a.pins),1+len(control.PHP_FILES))
-            self.assertTrue(all(path.startswith('/usr/local/libexec/') for path,_,_ in a.pins))
+            self.assertEqual(tuple(path for path, _, _ in a.pins), tuple(path for path, _ in control.ZIP_RECIPE))
+            self.assertEqual({path[4:] for path, _, _ in a.pins if path.startswith('php/')}, set(control.PHP_FILES))
             self.assertIn(('__main__.py','test_db_runtime_control_entry.py'),control.ZIP_RECIPE)
-            (root / PRODUCER_SOURCE).write_text('def collect(context):\n    return {}\n')
+            (root / PRODUCER_SOURCE).write_text('def collect_control(context):\n    return {}\n')
             with self.assertRaisesRegex(Refused, 'SOURCE_BUNDLE_NOT_READY'):
                 control.build_package(root)
             write_fixture_sources(root)
@@ -140,45 +154,77 @@ class ControlLaunchTests(unittest.TestCase):
             self.assertEqual(child.returncode, 0, child.stderr)
             self.assertEqual(child.stdout, b'fixture\n')
 
-    def test_root_capsule_is_valid_python_and_refuses_missing_installed_bundle(self):
-        context = control.authorize(Api(), self.env)
-        program = control.root_program(NONCE, context, ((control.ARCHIVE_PATH, 1, '0' * 64),))
-        compile(program, '<synthetic TEST capsule>', 'exec')
+    def test_package_decoder_rejects_wrong_hash_and_trailing_stream(self):
         with tempfile.TemporaryDirectory() as directory:
-            with patch.object(control.guard, 'LOCK', str(Path(directory) / 'absent')):
-                program = control.root_program(NONCE, context, ((control.ARCHIVE_PATH, 1, '0' * 64),))
-            child = subprocess.run([sys.executable, '-I', '-B', '-S', '-c', program],
-                                   capture_output=True, timeout=3, check=True)
-        payload = json.loads(child.stdout)
-        self.assertEqual(payload['context_sha256'], control.digest(context))
-        self.assertIsNone(payload['report'])
+            root = Path(directory)
+            write_fixture_sources(root)
+            package = control.build_package(root)
+        raw = package.archive
+        compressed = bz2.compress(raw)
+        pin = sha256(raw).hexdigest()
+        archive, php = control.capsule.decode_package(base64.b64encode(compressed), len(raw), pin, package.pins)
+        self.assertEqual(archive, raw)
+        self.assertEqual(set(php), set(control.PHP_FILES))
+        for invalid, expected in ((compressed + bz2.compress(b'x'), pin), (compressed, '0' * 64)):
+            with self.assertRaises(control.capsule.PackageRefused):
+                control.capsule.decode_package(base64.b64encode(invalid), len(raw), expected, package.pins)
 
-    def test_entry_uses_control_method_and_refuses_private_context_before_calling_it(self):
-        import io
-        from unittest.mock import Mock
+    def test_root_capsule_compiles_and_rejects_oversized_final_argument(self):
+        context = control.authorize(Api(), self.env)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_fixture_sources(root)
+            fixture = control.build_package(root)
+        program = control.root_program(NONCE, context, fixture)
+        compile(program, '<synthetic TEST capsule>', 'exec')
+        self.assertLessEqual(len(program.encode('ascii')) + 1, 131072)
+        with patch.object(control, 'MAX_CHILD', len(program)-1):
+            with self.assertRaisesRegex(Refused, 'SOURCE_BUNDLE_NOT_READY'):
+                control.root_program(NONCE, context, fixture)
 
+    @unittest.skipUnless(sys.platform == 'linux' and hasattr(os, 'memfd_create'), 'Linux sealed memfd')
+    def test_sealed_readonly_archive_runs_as_python_zipapp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_fixture_sources(root)
+            (root / control.PYTHON_FILES[0]).write_text('import test_db_runtime_producer\nprint("sealed")\n')
+            package = control.build_package(root)
+        with ExitStack() as resources:
+            fd = control.capsule.archive_descriptor(resources, package.archive)
+            with self.assertRaises(OSError):
+                os.write(fd, b'forbidden')
+            child = subprocess.run([sys.executable, '-I', '-B', '-S', '/proc/self/fd/' + str(fd)],
+                                   pass_fds=(fd,), capture_output=True, check=True, timeout=3)
+            self.assertEqual(child.stdout, b'sealed\n')
+
+    def test_entry_uses_staging_and_absolute_deadline_and_refuses_bad_context(self):
         context = control.authorize(Api(), self.env)
         private = dict(context, scope=dict(context['scope'], repository='JSMJapan/jsm-storefront'))
+        staging = dict(path='/run/jsm-db-2760-' + NONCE, device=1, inode=2,
+                       files={name: dict(device=1, inode=index, size=3, sha256='a'*64)
+                              for index, name in enumerate(control.PHP_FILES, 3)})
         producer = types.ModuleType('test_db_runtime_producer')
-        result = dict(status='BLOCKED', local_peer='NOT_ESTABLISHED', configured_runtime='NOT_ESTABLISHED',
-                      sql='NOT_ATTEMPTED', metadata=None)
+        result = blocked_report()
         producer.collect_control = Mock(return_value=dict(result, internal_note='discarded'))
         output = io.BytesIO()
+        until = time.monotonic_ns() + 3_000_000_000
+        cases = ((private, staging, until, 1), (context, dict(staging, path='/tmp/refused'), until, 1),
+                 (context, staging, until - 4_000_000_000, 1), (context, staging, until, 0))
         with patch.dict(sys.modules, {producer.__name__: producer}):
-            for value, expected in ((private, 1), (context, 0)):
+            for value, files, deadline, expected in cases:
+                payload = dict(context=value, staging=files, deadline_ns=deadline)
                 runtime = types.SimpleNamespace(platform='linux', argv=['report.pyz'],
-                                                stdin=types.SimpleNamespace(buffer=io.BytesIO(control.canonical(value))),
+                                                stdin=types.SimpleNamespace(buffer=io.BytesIO(control.canonical(payload))),
                                                 stdout=types.SimpleNamespace(buffer=output))
                 with patch.object(entry, 'sys', runtime), patch.object(entry.os, 'geteuid', return_value=0):
                     self.assertEqual(entry.main(), expected)
-        producer.collect_control.assert_called_once_with(context)
+        producer.collect_control.assert_called_once_with(context, staging, until)
         self.assertEqual(json.loads(output.getvalue()), result)
 
     def test_remote_result_is_correlated_and_has_a_closed_schema(self):
         context=control.authorize(Api(),self.env)
         payload=dict(version=control.VERSION,nonce=NONCE,euid=0,context_sha256=control.digest(context),
-                     report=dict(status='BLOCKED',configured_runtime='NOT_ESTABLISHED',
-                                 local_peer='NOT_ESTABLISHED',sql='NOT_ATTEMPTED',metadata=None))
+                     cleanup='VERIFIED', transport_reason=None, report=blocked_report())
         envelope=dict(version='jsm-test-installed-route-outer-v2',nonce=NONCE,principal='marinagurina',euid=1000,
                       root_diagnostic=payload)
         good=json.dumps(envelope).encode()
@@ -193,3 +239,18 @@ class ControlLaunchTests(unittest.TestCase):
         payload['report']['unexpected']='private content'
         with self.assertRaises(Refused):
             control.project_remote(json.dumps(envelope).encode(),NONCE,context)
+
+
+    def test_unconfirmed_cleanup_never_returns_success(self):
+        context = control.authorize(Api(), self.env)
+        child = dict(version=control.VERSION, nonce=NONCE, euid=0, context_sha256=control.digest(context),
+                     cleanup='UNCONFIRMED', transport_reason='STAGING_CLEANUP_UNCONFIRMED',
+                     report=blocked_report('UNCONFIRMED'))
+        envelope = dict(version='jsm-test-installed-route-outer-v2', nonce=NONCE,
+                        principal='marinagurina', euid=1000, root_diagnostic=child)
+        outcome = control.project_remote(control.canonical(envelope), NONCE, context)
+        self.assertEqual((outcome['status'], outcome['cleanup']), ('BLOCKED', 'UNCONFIRMED'))
+        self.assertEqual(outcome['reason'], 'CONTEXT_REQUIRED')
+        child['transport_reason'] = None
+        with self.assertRaises(Refused):
+            control.project_remote(control.canonical(envelope), NONCE, context)

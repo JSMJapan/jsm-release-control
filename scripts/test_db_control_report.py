@@ -1,5 +1,7 @@
 """Verify the protected GitHub launch and collect a closed TEST metadata receipt."""
 import ast
+import base64
+import bz2
 from dataclasses import dataclass
 from hashlib import sha256
 import inspect
@@ -16,10 +18,12 @@ from apache_parity_bridge import Refused, _GitHubGet, _read_regular, need, stric
 from hostinger_preflight import policy_ready
 from test_db_installer_receipt import _run
 from test_db_runtime_control_contract import (
-    ENVIRONMENT_NAME, REFERENCE_SITE_SHA, REPO, RUN_ACTOR, SCOPE, VERSION, WORKFLOW, canonical, digest, report_valid,
+    ENVIRONMENT_NAME, FD_REASONS, PHP_FILES, REASONS, REFERENCE_SITE_SHA, REPORT_FIELDS, REPO, RUN_ACTOR,
+    SCOPE, STAGES, VERSION, WORKFLOW, canonical, digest, report_valid,
 )
 from test_installer_capture_encrypted import GH_ENV, GH_REPO, OVERALL_SECONDS, _receive
-import test_installer_publisher_guard as guard
+import test_db_control_capsule as capsule
+import test_db_control_staging as staging
 
 
 WORKFLOW_ENDPOINT = GH_REPO + '/actions/workflows/' + WORKFLOW.rsplit('/', 1)[1]
@@ -31,18 +35,19 @@ FIXED_ENV = dict(GITHUB_REPOSITORY=REPO, GITHUB_ACTOR=OWNER['login'], GITHUB_TRI
                  GITHUB_REF='refs/heads/main', GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_RUN_ATTEMPT='1',
                  GITHUB_SERVER_URL='https://github.com', GITHUB_API_URL='https://api.github.com',
                  GITHUB_JOB='report', GITHUB_WORKFLOW_REF=REPO + '/' + WORKFLOW + '@refs/heads/main')
-ARCHIVE_PATH = '/usr/local/libexec/jsm-test-db-control-report.pyz'
 PYTHON_FILES = (
     'test_db_runtime_control_entry.py', 'test_db_runtime_control_contract.py', 'test_db_runtime_producer.py', 'test_db_runtime_protocol.py',
-    'test_db_runtime_fastcgi.py', 'test_db_runtime_kernel.py', 'test_db_runtime_proc.py',
+    'test_db_runtime_fastcgi.py', 'test_db_runtime_kernel.py', 'test_db_runtime_proc.py', 'test_db_runtime_preentry.py',
     'test_db_installer_receipt.py', 'apache_parity_bridge.py', 'hostinger_preflight.py',
     'test_db_os_metadata.py', 'test_db_php_endpoint.py', 'test_db_docker_metadata.py',
     'test_db_docker_binding.py', 'test_php_manifest_readonly.py', 'test_installer_capture_encrypted.py',
     'test_installer_capture_capsule.py', 'test_api_installed_route_readonly.py', 'test_api_readonly_access.py',
 )
-PHP_FILES = ('test_db_runtime_entry.php', 'test_db_runtime_probe.php', 'test_db_runtime_pdo.php',
-             'test_db_runtime_php_channel.php', 'test_db_runtime_startup.php')
-ZIP_RECIPE = (('__main__.py', PYTHON_FILES[0]),) + tuple((name, name) for name in PYTHON_FILES[1:])
+ZIP_RECIPE = ((('__main__.py', PYTHON_FILES[0]),) + tuple((name, name) for name in PYTHON_FILES[1:])
+              + tuple(('php/' + name, name) for name in PHP_FILES))
+MAX_CHILD = 131_071  # Leave room for the terminating NUL in the Linux argument.
+CAPSULE_FAILURES = ('CAPSULE_PACKAGE_REFUSED', 'STAGING_REFUSED', 'CAPSULE_DEADLINE',
+                    'CAPSULE_PRODUCER_REFUSED', 'STAGING_CLEANUP_UNCONFIRMED')
 CONTEXT_REFUSED = 'EXACT_CONTROL_WORKFLOW_CONTEXT_REQUIRED'
 RUN_REFUSED = 'GITHUB_CONTROL_RUN_NOT_VERIFIED'
 APPROVAL_REFUSED = 'OWNER_ENVIRONMENT_APPROVAL_NOT_VERIFIED'
@@ -113,98 +118,48 @@ class Package:
     pins: tuple
 
 
+def public_producer_ready(data):
+    for node in ast.parse(data).body:
+        if isinstance(node, ast.FunctionDef) and node.name == 'collect_control':
+            args = node.args
+            return ([arg.arg for arg in args.args] == ['context', 'staging', 'deadline_ns']
+                    and not (args.posonlyargs or args.kwonlyargs or args.defaults or args.vararg or args.kwarg))
+    return False
+
+
 def build_package(root):
     try:
-        stream = io.BytesIO()
+        stream, pins = io.BytesIO(), []
         with ZipFile(stream, 'w') as archive:
             for member, source in ZIP_RECIPE:
                 data = _read_regular(root / source, 128 * 1024)
                 need(data, BUNDLE_REFUSED)
                 if source == 'test_db_runtime_producer.py':
-                    functions = ast.parse(data).body
-                    need(any(isinstance(node, ast.FunctionDef) and node.name == 'collect_control'
-                             for node in functions), BUNDLE_REFUSED)
+                    need(public_producer_ready(data), BUNDLE_REFUSED)
                 info = ZipInfo(member, date_time=(1980, 1, 1, 0, 0, 0))
                 info.create_system = 3
                 info.external_attr = 0o100444 << 16
                 archive.writestr(info, data)
+                pins.append((member, len(data), sha256(data).hexdigest()))
         bundle = stream.getvalue()
-        pins = [(ARCHIVE_PATH, len(bundle), sha256(bundle).hexdigest())]
-        for name in PHP_FILES:
-            data = _read_regular(root / name, 128 * 1024)
-            need(data, BUNDLE_REFUSED)
-            pins.append(('/usr/local/libexec/' + name, len(data), sha256(data).hexdigest()))
+        need(0 < len(bundle) <= 512 * 1024, BUNDLE_REFUSED)
         return Package(bundle, tuple(pins))
     except (OSError, SyntaxError, Refused):
         raise Refused(BUNDLE_REFUSED) from None
 
 
-def root_program(nonce, context, pins):
-    """Read the fixed root-owned payload under the deploy lock and run its validated inode."""
-    header = ('import fcntl,json,os,selectors,stat,subprocess,sys,time\n'
-              'from contextlib import contextmanager,ExitStack\nfrom hashlib import sha256\n')
-    guard_code = '\n'.join(inspect.getsource(item) for item in (
-        guard.GuardRefused, guard.stamp, guard.trusted, guard.open_trusted_file, guard.fingerprint, report_valid,
-    ))
-    constants = f'\nlock_path={guard.LOCK!r}\npins={pins!r}\ncontext={canonical(context)!r}\nnonce={nonce!r}\nversion={VERSION!r}\n'
-    return header + guard_code + constants + r'''
-def pairs(rows):
-    result = dict(rows)
-    if len(result) != len(rows):
-        raise ValueError()
-    return result
-
-def run():
-    if os.geteuid() != 0:
-        raise GuardRefused()
-    deadline = time.monotonic() + 3.6
-    with ExitStack() as stack:
-        lock, check = stack.enter_context(open_trusted_file(lock_path))
-        fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        files = [stack.enter_context(open_trusted_file(path, size=size)) for path, size, _ in pins]
-        for (file, _), (_, size, expected) in zip(files, pins):
-            if fingerprint(file, size) != expected:
-                raise GuardRefused()
-        check()
-        for _, verify in files:
-            verify()
-        archive = files[0][0]
-        with subprocess.Popen(['/usr/bin/python3','-I','-B','-S','/proc/self/fd/'+str(archive)],
-                              pass_fds=(archive,), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                              stderr=subprocess.DEVNULL, env={'PATH':'/usr/bin:/bin','LANG':'C'}) as process:
-            try:
-                process.stdin.write(context)
-                process.stdin.close()
-                raw = bytearray()
-                with selectors.DefaultSelector() as selector:
-                    selector.register(process.stdout, selectors.EVENT_READ)
-                    while True:
-                        left = deadline - time.monotonic()
-                        if left <= 0 or not selector.select(left):
-                            raise GuardRefused()
-                        data = os.read(process.stdout.fileno(), 4097-len(raw))
-                        if not data:
-                            break
-                        raw.extend(data)
-                        if len(raw) > 4096:
-                            raise GuardRefused()
-                if process.wait(timeout=max(0, deadline-time.monotonic())) != 0:
-                    raise GuardRefused()
-            finally:
-                if process.poll() is None:
-                    process.kill()
-        report = json.loads(raw.decode('ascii'), object_pairs_hook=pairs)
-        if not report_valid(report):
-            raise GuardRefused()
-        return report
-
-try:
-    report = run()
-except Exception:
-    report = None
-print(json.dumps(dict(version=version, nonce=nonce, euid=os.geteuid(),
-                      context_sha256=sha256(context).hexdigest(), report=report), sort_keys=True))
-'''
+def root_program(nonce, context, package):
+    # The transport runs this fixed evaluator with the reviewed public inputs.
+    encoded = base64.b64encode(bz2.compress(package.archive))
+    schema = '\n'.join(f'{name}={value!r}' for name, value in dict(
+        VERSION=VERSION, STAGES=STAGES, REASONS=REASONS, FD_REASONS=FD_REASONS, REPORT_FIELDS=REPORT_FIELDS,
+    ).items())
+    source = '\n'.join((inspect.getsource(staging), inspect.getsource(capsule), schema,
+                        inspect.getsource(canonical), inspect.getsource(report_valid),
+                        f'print(canonical(root_receipt({nonce!r},{context!r},{encoded!r},'
+                        f'{len(package.archive)},{sha256(package.archive).hexdigest()!r},{package.pins!r})).decode("ascii"),end="")'))
+    need(source.isascii() and len(source) <= MAX_CHILD, BUNDLE_REFUSED)
+    return source
 
 
 def project_remote(raw, nonce, context):
@@ -216,11 +171,26 @@ def project_remote(raw, nonce, context):
              and type(outer['euid']) is int and outer['euid'] > 0, RECEIPT_REFUSED)
         child = outer['root_diagnostic']
         need(matches(child, {'version': VERSION, 'nonce': nonce, 'euid': 0, 'context_sha256': digest(context)})
-             and set(child) == {'version', 'nonce', 'euid', 'context_sha256', 'report'}
-             and report_valid(child['report']), RECEIPT_REFUSED)
-        return dict(version=VERSION, scope=context['scope'], github_run=context['run']['id'],
+             and set(child) == {'version', 'nonce', 'euid', 'context_sha256', 'report', 'cleanup', 'transport_reason'},
+             RECEIPT_REFUSED)
+        reason, report, cleanup = child['transport_reason'], child['report'], child['cleanup']
+        if reason is None:
+            need(cleanup == 'VERIFIED' and report_valid(report) and report['fastcgi_state'] != 'UNCONFIRMED',
+                 RECEIPT_REFUSED)
+            status = report['status']
+        else:
+            required_cleanup = ('UNCONFIRMED' if reason == 'STAGING_CLEANUP_UNCONFIRMED' else
+                                'VERIFIED' if reason == 'CAPSULE_DEADLINE' else 'NOT_NEEDED')
+            need(reason in CAPSULE_FAILURES and cleanup == required_cleanup
+                 and (report is None or cleanup == 'UNCONFIRMED' and report_valid(report)), RECEIPT_REFUSED)
+            status = 'BLOCKED'
+            if report is None:
+                report = dict(sql='UNKNOWN' if cleanup == 'UNCONFIRMED' else 'NOT_ATTEMPTED',
+                              configured_runtime='NOT_ESTABLISHED', local_peer='NOT_ESTABLISHED')
+        return dict(version=VERSION, scope=context['scope'], github_run=context['run']['id'], status=status,
                     reviewed_control_sha=context['control_sha'], reference_site_sha=REFERENCE_SITE_SHA,
-                    db_isolation='NOT_ESTABLISHED', **child['report'])
+                    db_isolation='NOT_ESTABLISHED', transport_reason=reason, cleanup=cleanup,
+                    **{key: value for key, value in report.items() if key != 'status'})
     except (ValueError, TypeError, Refused):
         raise Refused(RECEIPT_REFUSED) from None
 
@@ -229,7 +199,8 @@ def collect(api, env, source_dir):
     deadline = time.monotonic() + OVERALL_SECONDS
     context = authorize(api, env)
     package = build_package(source_dir)
-    raw, nonce = _receive(env, deadline, lambda challenge: root_program(challenge, context, package.pins))
+    root_program('0' * 32, context, package)  # Refuse oversize before transport.
+    raw, nonce = _receive(env, deadline, lambda challenge: root_program(challenge, context, package))
     return project_remote(raw, nonce, context)
 
 
