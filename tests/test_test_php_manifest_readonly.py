@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -91,6 +92,24 @@ class CapsuleFixtureTests(unittest.TestCase):
     def use_lock_fixture(self, fd):
         self.ns['_manifest_lock'] = lambda *_: os.dup(fd)
         self.ns['_manifest_lock_path'] = lambda *_: ((), self.ns['_manifest_stamp'](os.fstat(fd)))
+
+    def test_release_owner_is_allowed_only_in_the_fixed_site_tree(self):
+        owner = (1201, 1202)
+        info = SimpleNamespace(st_uid=1201, st_gid=1202, st_mode=0o755)
+        inherited_owner = self.ns['_site_owner_for_path']
+        trusted = self.ns['_manifest_trusted']
+        parts = ['srv', 'jsm', 'app', 'backend', 'api', 'entry.php']
+        self.assertFalse(trusted(info, inherited_owner(parts, 0, owner)))
+        self.assertFalse(trusted(info, inherited_owner(parts, 1, owner)))
+        self.assertTrue(trusted(info, inherited_owner(parts, 2, owner)))
+        self.assertFalse(trusted(info, inherited_owner(['run', 'jsm'], 1, owner)))
+        self.assertFalse(trusted(SimpleNamespace(st_uid=1201, st_gid=1203, st_mode=0o755), owner))
+        self.assertFalse(trusted(SimpleNamespace(st_uid=1201, st_gid=1202, st_mode=0o775), owner))
+
+    def test_php_worker_cannot_be_the_deployment_owner(self):
+        self.ns['_proc_read'] = lambda *_: 'Name:\tphp-fpm\nUid:\t1201\t1201\t1201\t1201\n'
+        with self.assertRaises(ValueError):
+            self.ns['_manifest_worker_uid'](123, (1201, 1202), time.monotonic()+1)
 
     def test_changed_generation_invalidates_every_observation(self):
         first = child()['files']
