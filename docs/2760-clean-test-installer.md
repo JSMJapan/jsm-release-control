@@ -1,0 +1,56 @@
+# #2760: finite isolated article TEST — source candidate
+
+Purpose: prepare a separate temporary synthetic-only TEST for the five reviewed articles while preserving shared develop, Telegram/messages, existing databases, Apache/FPM and publishers. Authority and coordination: [issue2760](https://github.com/JSMJapan/jsm-storefront/issues/2760). Target only GCE `jsm-sandbox / dark-berm-508215-d2 / asia-northeast1-a / VM150919059249400713`, through the existing protected GitHub `test-api-readonly-access` and pinned key-only `marinagurina@34.104.157.63:22` route. No direct local SSH.
+
+This candidate is independent of unmerged/unselected PR35. Old operational scripts and read-only4s/131071B limits are unchanged. Existing preflight changes only add19 exact path filters; one old test fixture uses the exact6161ffd isolation fix from3db3eec, preserving assertions. New modules are cohesive and below800lines.
+
+## Selected source and real artifact
+
+[Selected pins](../scripts/article_test_pins.json) freeze private build `b66fd853a55d62571e4e8cdba56a5d893aa0c1b9`, [successful run45194119662](https://github.com/JSMJapan/jsm-storefront/actions/runs/45194119662), artifact14828410357, ZIP650771424B, SHA256 `10f6a777faab17afe38f0a7163cf142a264d14f98ca73234a33ab42aadeab769`. Reviewed frontend source is0184/treeb43. The private archive/binaries/source are never committed or published here.
+
+Actual GitHub repository/run/job/native-step/upload/artifact binding was independently read back, then the downloaded ZIP was verified against this external digest. Exact9-member inventory, every internal SHA, native MySQL/PHP/SSR proof and10 Chromium handoffs passed. `physical_device=NOT_TESTED` remains explicit. The native step name is `Run native MySQL, article HTTP and Chromium acceptance without external networking`.
+
+The real Docker-save export is OCI: artifact image IDs are manifest digests. The reader verifies a finite index/tag → manifest digest → config digest/size → linux/amd64 config/User/entrypoint/rootfs → compressed layer digest/size → unpacked diff_id graph. Architecture/hash checks are not relaxed. It observed30 layer blobs, TAR657909248B and referenced unpacked bytes2229613568B; actual local verification took about7s. Legacy config-ID exports remain covered by synthetic fixtures.
+
+The only proved ID aliases are:
+
+| Role | Artifact/manifest ID | Config ID |
+| --- | --- | --- |
+| app | `sha256:c3b796966494ec19f086070ed94840e883b64970b978015240f42228518c0469` | `sha256:4ee8eebcd152af522e3e520f72a627c78da7d09fd03a48f63f2084e20efe6740` |
+| mysql | `sha256:6c6706ec58d3ac9e925d5f0435c6a923117f68232551b9c8271a294ea72ee331` | `sha256:0de4015d5b1f0fa462e43b48c29f8f66eacdd16d11e07aedf3b13533adadd504` |
+
+Older Docker can report config IDs; containerd can report manifest IDs. After load the exact selected tags must resolve to one of that image's **two proved aliases**. The actual Engine IDs are saved and used for create; each container's actual `.Image` is independently checked/saved against the same pair. Recovery cleanup and closed receipts preserve artifact IDs, loaded IDs and container IDs separately. A third/other image ID is refused; there is no arbitrary alias fallback.
+
+## One finite call chain
+
+The new [manual workflow](../.github/workflows/article-test-install-2760.yml) admits only JSMJapan/main/exact reviewed control SHA/attempt1 plus the sole protected owner environment approval. It validates policy before reading the existing SSH key. STAGE selects only the frozen build/run/artifact/digest; there is no latest/source/DSN/SQL/path input. The future protected `STOREFRONT_ACTIONS_READ_TOKEN` needs Actions:read for **only JSMJapan/jsm-storefront**. Its Authorization is sent only to fixed api.github.com paths, never the one signed storage redirect; URL/query/token are not logged.
+
+After runner ZIP/TAR validation, one pinned SSH stream carries a public Python bundle and the private ZIP. The remote account/sudo identity guard is preserved. Root executes the public bundle through Linux memfd and creates only `/var/lib/jsm-article-test-2760/<12hex>/`. Pending state+cleanup bundle+the same2h transient expiry are armed **before the first private payload byte**. Pending image/schema facts are NULL. Only full archive/graph validation replaces them with proved IDs/hashes; the original expiry stays unchanged. Pending cleanup never initializes Docker. A process-kill fixture exercises actual half-delivery followed by actual pending cleanup. Before expiry registration, interruption can leave only small public control files, not an accepted private ZIP/container.
+
+The received frame/ZIP is independently bounded/hash-checked and revalidated before image import. TAR/layers are never extracted onto the host by the reader. Docker load receives a bounded stream; no pull/registry/context/auth-helper fallback is allowed. Existing tags or exact run names cause refusal. Before load, every exact manifest/config image alias is checked on the same local Docker socket; any already-present image causes refusal, including an untagged/dangling one. Only complete404 with the exact bounded No such image error is absence; IO/status/schema errors refuse. HTTP200 reads headers only, never the image Config/Env body. The fixed unversioned route avoids assuming an unsupported API1.41 on newer Engines; there is no negotiation probe or global enumeration.
+
+New DB/app containers are created by saved exact Engine IDs. DB: network:none, new tmpfs512MiB data, drops NET_RAW, only new root-secret binds. App: same exact DB netns, read-only rootfs, cap-dropALL/no-new-privileges, tmp64MiB, only new reader-secret and private Unix ingress binds. Both:768MiB memory/swap ceiling,128PIDs,0.5CPU, private IPC, restart=no, json logs2MiB×1, no published ports/extra hosts/host namespaces. Fixed inspect projections exclude Env/Args/Logs and target only newly owned IDs. Resource/mount/tmpfs/netns/interface/route guards precede each SQL stage.
+
+The loader creates only `article_<run>` and `reader_<run>`, then separate authenticated schema and five-row synthetic seed stages, explicit UTF-8 client encoding, and SELECT grants on exactly two new tables. No existing DB is connected or changed. Private credentials are minted for this run and remain in root0700-owned storage/read-only binds, never output. Local/private Unix smoke reads5articles+2real404s in memory without publishing HTML. Its status is `STAGED_LOCAL_ONLY / qa=NOT_TESTED`, not public/browser/device TEST acceptance or release approval.
+
+## New operation budgets and cleanup
+
+These are separate new write-profile bounds: runner overall1500s; download300s; runner image validation180s; remote stage600s including receive≤300s and load≤120s; separate cleanup reserve≤90s; root alarm690s; root GNU timeout700s/kill-after10s; outer710s; SSH720s; workflow30min. No old reader cap increases. stdin/stdout use bounded nonblocking pumps; receipts≤8192B, public bundle≤131072B and each remote source argument<131071B. No retries or alternate SSH destination.
+
+Archive≤2GiB+1MiB, image gzip≤2GiB, Docker TAR≤6GiB, referenced unpacked layers≤6GiB, small metadata≤32KiB. Linux amd64,≥2CPUs and≥2.5GiB MemAvailable are required. Before delivery staging free space must cover archive+4GiB reserve; after ZIP validation, free Docker storage must cover measured `2×TAR +2×referenced unpacked layers +4GiB`, with separate filesystems accounted independently. For this archive the latter is10070012928B, with the ZIP already occupying disk. Actual VM capacity is still UNKNOWN.
+
+Per-role create intent is persisted before create, then IDs and observed container image identities are saved. Recovery resolves only that intended exact name+run label+proved image; failure before intent cannot delete a preexisting collision. Successful full-ID absence readback makes interrupted removal idempotent. Routine cleanup removes only owned app then DB and the exact selected tags with `image rm --no-prune` while they still match proved aliases. The pre-load exact-ID refusal protects preexisting dangling images; no-prune prevents ancestor deletion. It never prunes, scans/deletes arbitrary containers/volumes/images, or deletes shared tags.
+
+Partial import (`import_started` without confirmed completion) remains UNCONFIRMED even when tags are absent; recovery state/bundle/TTL stay. No absence/garbage collection of untagged/shared Docker layers is asserted. State.tmp recovery is bounded/root-owned/regular/single-link under the existing run lock; complete first saves can be promoted, unsafe temporary files refuse. All filesystem deletion entries are preflighted; controls/timer are removed last, so refused data cleanup retains recovery evidence. Expiry triggers the same exact-run cleanup after2h; it is not a standing monitor. Transient expiry may be lost on host reboot; restart=no prevents automatic container restart, but post-reboot cleanup is UNKNOWN.
+
+## Verification boundary and remaining gates
+
+The source candidate exercises real local ZIP/TAR/gzip and HTTP/socketpair readers, local subprocess deadline/kill/reap, actual killed partial receiver/expiry, and whole lifecycle with a **simulated Engine**. Both Engine ID forms and mixed tag/container forms are tested; wrong/third IDs and self-consistent wrong-architecture graphs refuse. The real selected ZIP/OCI digest graph was tested locally without Docker/VM. Private native CI passed actual MySQL/PHP/SSR+10 Chromium handoffs. None of these is actual host installer or phone QA.
+
+Two independent whole-source reviews and exact final public CI are required after this observed-format/pins delta. Future install also requires the minimal protected artifact-read credential and explicit owner approval naming the final SHA and new write scope. Separate HTTPS origin/TLS/Apache ingress is UNKNOWN and deliberately absent; shared develop is not redirected. Physical phone QA and release acceptance remain NOT_TESTED. No merge/manual workflow/VM/Docker/SQL operation has been performed by this candidate preparation. Root owns task/journal records.
+
+### Existing-image rollback correction
+
+The previous6b6 candidate did not protect an already-existing dangling image: adding its own tag then removing the last tag can delete that image, and default removal can prune parents. [Docker documents both behaviors](https://docs.docker.com/reference/cli/docker/image/rm/); [Moby28.5.2 implements the parent recursion](https://github.com/moby/moby/blob/v28.5.2/daemon/images/image_delete.go#L293-L340). Prior SOURCE_READY was withdrawn for this reachable defect. Actual Stage/cleanup helper regressions now refuse either preexisting proven ID form before load/SQL and require no-prune.
+
+The existing automatic Ubuntu CI additionally runs a disposable, synthetic scratch-image fixture without pull/application/network/VM: real image200/missing404, refusal for a dangling image, and the actual no-prune option. Docker absence on that GitHub runner fails rather than skips; local Mac is NOT_TESTED/SKIP. Parent retention is tested in the exact cleanup behavior model, not claimed as an observed legacy/containerd parent-chain fixture. The private b66 package, archive digest and all resource/deadline/partial-import rules remain unchanged.
