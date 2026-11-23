@@ -15,7 +15,8 @@
           "options": [
             "CHECK",
             "APPLY",
-            "ROLLBACK"
+            "ROLLBACK",
+            "RECOVER"
           ]
         }
       }

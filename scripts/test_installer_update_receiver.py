@@ -24,7 +24,10 @@ from test_installer_update_package import (
 _TARGET_CHAIN = ('usr', 'local', 'sbin')
 _REPORTER_CHAIN = ('usr', 'local', 'libexec')
 _LOCK_CHAIN = ('run',)
-_ALLOWED_CHAINS = (_TARGET_CHAIN, _REPORTER_CHAIN, _LOCK_CHAIN)
+_STATE_CHAIN = (*_REPORTER_CHAIN, 'jsm-test-installer-writer', 'state')
+_ALLOWED_CHAINS = (_TARGET_CHAIN, _REPORTER_CHAIN, _LOCK_CHAIN, _STATE_CHAIN)
+_PREVIOUS = 'previous'
+_CANDIDATE = 'candidate'
 _TARGET = 'jsm-sandbox-deploy'
 _REPORTER = 'jsm-test-db-report'
 _REPORTER_PIN = 'jsm-test-db-report.sha256'
@@ -33,7 +36,7 @@ _GCE = '169.254.169.254'
 _METADATA = '/computeMetadata/v1/'
 _MAX_REQUEST = 128
 _MAX_REPORTER = 128 * 1024
-_SUCCESS = frozenset(('READY', 'APPLIED', 'ROLLED_BACK', 'ALREADY_APPLIED', 'ALREADY_ORIGINAL'))
+_SUCCESS = frozenset(('READY', 'APPLIED', 'ROLLED_BACK', 'ALREADY_APPLIED', 'ALREADY_ORIGINAL', 'RECOVERED'))
 
 
 class _InvalidSize(ValueError):
@@ -113,9 +116,9 @@ def _file_stamp(info):
             info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
-def _safe_file(info, executable):
+def _safe_file(info, executable, *, links=1):
     return (
-        stat.S_ISREG(info.st_mode) and _safe_mode(info) and info.st_nlink == 1
+        stat.S_ISREG(info.st_mode) and _safe_mode(info) and info.st_nlink == links
         and info.st_mode & (stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX) == 0
         and (not executable or bool(info.st_mode & stat.S_IXUSR))
     )
@@ -164,9 +167,9 @@ def _check_file(file):
         raise ValueError()
 
 
-def _open_regular(stack, chain, name, *, executable=False):
+def _open_regular(stack, chain, name, *, executable=False, links=1):
     info = _lstat(chain, name)
-    if not _safe_file(info, executable):
+    if not _safe_file(info, executable, links=links):
         raise ValueError()
     # Resolve a typed leaf without activating it. A replaced FIFO, device
     # or symlink fails fstat before any open that could start I/O.
@@ -233,7 +236,7 @@ def _unlink_stage(fd, directory, name):
         pass
 
 
-def _stage(stack, target, raw):
+def _stage(stack, target, raw, *, mode=None):
     directory = target.chain.fds[-1]
     name = '.jsm-test-installer-update-' + secrets.token_hex(16)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -247,23 +250,110 @@ def _stage(stack, target, raw):
             raise OSError()
         offset += wrote
     os.fchown(fd, target.info.st_uid, target.info.st_gid)
-    os.fchmod(fd, stat.S_IMODE(target.info.st_mode))
+    mode = stat.S_IMODE(target.info.st_mode) if mode is None else mode
+    os.fchmod(fd, mode)
     os.fsync(fd)
     info = os.fstat(fd)
-    if (not _safe_file(info, True) or info.st_size != len(raw)
-            or (info.st_mode, info.st_uid, info.st_gid) != (target.info.st_mode, target.info.st_uid, target.info.st_gid)):
+    if (not _safe_file(info, bool(mode & stat.S_IXUSR)) or info.st_size != len(raw)
+            or (stat.S_IMODE(info.st_mode), info.st_uid, info.st_gid) != (mode, target.info.st_uid, target.info.st_gid)):
         raise ValueError()
     return _File(target.chain, name, fd, info)
 
 
 def _readback(stack, target, staged, expected):
-    path = _open_regular(stack, target.chain, target.name, executable=True)
+    path = _open_regular(stack, target.chain, target.name, executable=True, links=staged.info.st_nlink)
     # Atomic rename can advance ctime. Device/inode, physical attributes and
     # content must still match the prepared and fsynced object.
     if _file_stamp(path.info)[:-1] != _file_stamp(staged.info)[:-1]:
         raise ValueError()
     if sha256(_read_exact(path, MAX_INSTALLER_BYTES)).hexdigest() != expected:
         raise ValueError()
+
+
+def _state(stack):
+    state = _anchor(stack, _STATE_CHAIN)
+    if stat.S_IMODE(os.fstat(state.fds[-1]).st_mode) != 0o700:
+        raise ValueError()
+    return state
+
+
+def _backup(stack, state, target):
+    previous = _open_regular(stack, state, _PREVIOUS)
+    if stat.S_IMODE(previous.info.st_mode) != 0o600 or os.listxattr(previous.fd):
+        raise ValueError()
+    content = _read_exact(previous, MAX_INSTALLER_BYTES)
+    if sha256(content).hexdigest() != ORIGINAL_SHA256:
+        raise ValueError()
+    if previous.info.st_dev != target.info.st_dev:
+        raise ValueError()
+    return previous, content
+
+
+def _ensure_backup(stack, state, target, original):
+    if sha256(original).hexdigest() != ORIGINAL_SHA256:
+        raise ValueError()
+    try:
+        _lstat(state, _PREVIOUS)
+    except FileNotFoundError:
+        record = _stage(stack, target._replace(chain=state), original, mode=0o600)
+        directory = state.fds[-1]
+        _check_file(record)
+        os.link(record.name, _PREVIOUS, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+        os.unlink(record.name, dir_fd=directory)
+        os.fsync(directory)
+    return _backup(stack, state, target)[0]
+
+
+def _candidate(stack, state, target):
+    candidate = _open_regular(stack, state, _CANDIDATE, executable=True, links=2)
+    if _file_stamp(candidate.info) != _file_stamp(target.info):
+        raise ValueError()
+    return candidate
+
+
+def _discard_uninstalled_pin(staged, state):
+    # If the stage is still named, no replacement committed. Retire only
+    # our own link. A disappearing stage leaves the durable pin in place.
+    try:
+        current = _lstat(staged.chain, staged.name)
+        held = os.fstat(staged.fd)
+        candidate = _lstat(state, _CANDIDATE)
+    except FileNotFoundError:
+        return
+    expected = (held.st_dev, held.st_ino)
+    if (current.st_dev, current.st_ino) == expected == (candidate.st_dev, candidate.st_ino):
+        _check_chain(staged.chain)
+        _check_chain(state)
+        installed = _lstat(staged.chain, _TARGET)
+        if (installed.st_dev, installed.st_ino) == expected:
+            return
+        os.unlink(_CANDIDATE, dir_fd=state.fds[-1])
+        os.fsync(state.fds[-1])
+
+
+def _pin_candidate(stack, staged, state):
+    _check_file(staged)
+    directory = state.fds[-1]
+    os.link(staged.name, _CANDIDATE, src_dir_fd=staged.chain.fds[-1], dst_dir_fd=directory, follow_symlinks=False)
+    stack.callback(_discard_uninstalled_pin, staged, state)
+    updated = staged._replace(info=os.fstat(staged.fd))
+    if not _safe_file(updated.info, True, links=2):
+        raise ValueError()
+    candidate = _candidate(stack, state, updated)
+    os.fsync(staged.fd)
+    os.fsync(directory)
+    return updated, candidate
+
+
+def _retire_candidate(state, candidate):
+    # The successful restore has removed the serving name; the private
+    # reference still anchors its inode until the state directory is synced.
+    current = _lstat(state, _CANDIDATE)
+    held = os.fstat(candidate.fd)
+    if (current.st_dev, current.st_ino, current.st_nlink) != (held.st_dev, held.st_ino, 1):
+        raise ValueError()
+    os.unlink(_CANDIDATE, dir_fd=state.fds[-1])
+    os.fsync(state.fds[-1])
 
 
 def _apply(operation):
@@ -273,11 +363,32 @@ def _apply(operation):
             lock = _take_lock(stack)
             phase = 'TARGET_REFUSED'
             chain = _anchor(stack, _TARGET_CHAIN)
-            target = _open_regular(stack, chain, _TARGET, executable=True)
+            links = _lstat(chain, _TARGET).st_nlink
+            if links not in (1, 2):
+                return phase
+            target = _open_regular(stack, chain, _TARGET, executable=True, links=links)
+            state = candidate = previous = None
+            if links == 2 or operation == 'RECOVER':
+                if operation == 'RECOVER':
+                    phase = 'RECOVERY_REFUSED'
+                state = _state(stack)
+                candidate = _candidate(stack, state, target)
             # The transaction preserves POSIX ownership and mode. Refuse an
             # installer with ACL, capability or other unmanaged attributes.
             if os.listxattr(target.fd):
                 return 'TARGET_REFUSED'
+            if operation == 'RECOVER':
+                previous, replacement = _backup(stack, state, target)
+                staged = _stage(stack, target, replacement)
+                for record in (previous, candidate, lock, target, staged):
+                    _check_file(record)
+                os.replace(staged.name, target.name, src_dir_fd=chain.fds[-1], dst_dir_fd=chain.fds[-1])
+                phase = 'READBACK_UNCERTAIN'
+                os.fsync(chain.fds[-1])
+                _readback(stack, target, staged, ORIGINAL_SHA256)
+                _retire_candidate(state, candidate)
+                return 'RECOVERED'
+            phase = 'TARGET_REFUSED'
             try:
                 original = _read_exact(target, MAX_INSTALLER_BYTES)
             except _InvalidSize:
@@ -315,7 +426,17 @@ def _apply(operation):
                 return status
 
             phase = 'WRITE_REFUSED'
+            if operation == 'APPLY':
+                phase = 'RECOVERY_REFUSED'
+                state = _state(stack)
+                previous = _ensure_backup(stack, state, target, original)
             staged = _stage(stack, target, replacement)
+            if operation == 'APPLY':
+                staged, candidate = _pin_candidate(stack, staged, state)
+            phase = 'WRITE_REFUSED'
+            for recovery_record in (previous, candidate):
+                if recovery_record is not None:
+                    _check_file(recovery_record)
             for item in reporter:
                 _check_file(item)
             _check_file(staged)
@@ -331,6 +452,8 @@ def _apply(operation):
             _check_file(lock)
             for item in reporter:
                 _check_file(item)
+            if operation == 'ROLLBACK' and candidate is not None:
+                _retire_candidate(state, candidate)
             return 'ROLLED_BACK' if operation == 'ROLLBACK' else 'APPLIED'
     except (OSError, ValueError, AttributeError):
         return phase

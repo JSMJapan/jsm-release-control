@@ -3,7 +3,7 @@
 from hashlib import sha256
 
 PROTOCOL = 'jsm-test-installer-update-v1'
-OPERATIONS = ('CHECK', 'APPLY', 'ROLLBACK')
+OPERATIONS = ('CHECK', 'APPLY', 'ROLLBACK', 'RECOVER')
 ORIGINAL_SIZE = 8033
 ORIGINAL_SHA256 = '4b0815ff755c6b29165a8102f2bc47c2a7dd49a567b367b2c55637522996a6cc'
 UPDATED_SHA256 = '2708153242a0efb911db34978bd4bbe8c345964156e9b908e8e1fdfbdbff7518'
@@ -23,12 +23,13 @@ STATUSES = frozenset((
     'PREIMAGE_REFUSED', 'REPORTER_UNAVAILABLE', 'TARGET_REFUSED', 'LOCK_REFUSED',
     'ORIGINAL_NO_REPORTER', 'UPDATED_NO_REPORTER',
     'WRITE_REFUSED', 'READBACK_UNCERTAIN', 'REQUEST_REFUSED',
+    'RECOVERED', 'RECOVERY_REFUSED',
 ))
 
 
 def transform(raw, operation):
     """Calculate only the pinned transition or inverse. Writes are separate."""
-    if operation not in OPERATIONS:
+    if operation not in OPERATIONS or operation == 'RECOVER':
         return 'REQUEST_REFUSED', None
     if type(raw) is not bytes or len(raw) not in (ORIGINAL_SIZE, UPDATED_SIZE):
         return 'PREIMAGE_REFUSED', None

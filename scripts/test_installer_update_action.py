@@ -27,6 +27,7 @@ RESULTS = {
     'CHECK': frozenset(('READY', 'ALREADY_APPLIED')),
     'APPLY': frozenset(('APPLIED', 'ALREADY_APPLIED')),
     'ROLLBACK': frozenset(('ROLLED_BACK', 'ALREADY_ORIGINAL')),
+    'RECOVER': frozenset(('RECOVERED',)),
 }
 SUCCESSES = frozenset().union(*RESULTS.values())
 SAFE_ERRORS = STATUSES | {

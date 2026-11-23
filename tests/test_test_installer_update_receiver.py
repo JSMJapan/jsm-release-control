@@ -60,8 +60,11 @@ class ReceiverTests(unittest.TestCase):
         stack = ExitStack()
         self.addCleanup(stack.close)
         self.root = Path(stack.enter_context(tempfile.TemporaryDirectory()))
-        for chain in (receiver._TARGET_CHAIN, receiver._REPORTER_CHAIN, receiver._LOCK_CHAIN):
+        for chain in (receiver._TARGET_CHAIN, receiver._REPORTER_CHAIN, receiver._LOCK_CHAIN, receiver._STATE_CHAIN):
             self.root.joinpath(*chain).mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.state = self.root.joinpath(*receiver._STATE_CHAIN)
+        self.previous = self.state / receiver._PREVIOUS
+        self.candidate = self.state / receiver._CANDIDATE
         self.target = self.root.joinpath(*receiver._TARGET_CHAIN, receiver._TARGET)
         self.lock = self.root.joinpath(*receiver._LOCK_CHAIN, receiver._LOCK)
         self.reporter = self.root.joinpath(*receiver._REPORTER_CHAIN, receiver._REPORTER)
@@ -87,7 +90,7 @@ class ReceiverTests(unittest.TestCase):
         return info.st_uid == os.getuid() and not info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
 
     def open_chain(self, parts):
-        self.assertIn(parts, (receiver._TARGET_CHAIN, receiver._REPORTER_CHAIN, receiver._LOCK_CHAIN))
+        self.assertIn(parts, (receiver._TARGET_CHAIN, receiver._REPORTER_CHAIN, receiver._LOCK_CHAIN, receiver._STATE_CHAIN))
         descriptors = []
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
         try:
@@ -229,8 +232,10 @@ class ReceiverTests(unittest.TestCase):
         stage = receiver._stage
         intervening = b'independent concurrent replacement'
 
-        def change_after_stage(*args):
-            staged = stage(*args)
+        def change_after_stage(*args, **kwargs):
+            staged = stage(*args, **kwargs)
+            if staged.chain.parts == receiver._STATE_CHAIN:
+                return staged
             sibling = self.root / 'intervening'
             sibling.write_bytes(intervening)
             sibling.chmod(0o750)
@@ -245,6 +250,60 @@ class ReceiverTests(unittest.TestCase):
         with patch.object(receiver, '_readback', side_effect=ValueError('private detail')):
             self.assertEqual(receiver.handle(request('APPLY')), 'READBACK_UNCERTAIN')
         self.assert_target(UPDATED)
+
+    def test_previous_and_candidate_are_present_and_synced_before_install_replace(self):
+        synced = set()
+
+        def record_sync(fd):
+            info = os.fstat(fd)
+            synced.add((info.st_dev, info.st_ino))
+            os.fsync(fd)
+
+        def verify_pins_before_replace(source, destination, **kwargs):
+            self.assertEqual(destination, receiver._TARGET)
+            self.assertEqual(self.previous.read_bytes(), ORIGINAL)
+            for path in (self.previous, self.candidate, self.state):
+                info = path.stat()
+                self.assertIn((info.st_dev, info.st_ino), synced)
+            self.assertEqual(self.candidate.stat().st_nlink, 2)
+            os.replace(source, destination, **kwargs)
+
+        with patch.object(self.fixture_os, 'fsync', side_effect=record_sync), \
+                patch.object(self.fixture_os, 'replace', side_effect=verify_pins_before_replace):
+            self.assertEqual(receiver.handle(request('APPLY')), 'APPLIED')
+        self.assertEqual(self.candidate.stat().st_ino, self.target.stat().st_ino)
+
+    def test_recover_uncertain_candidate_even_if_its_bytes_were_corrupted(self):
+        with patch.object(receiver, '_readback', side_effect=ValueError()):
+            self.assertEqual(receiver.handle(request('APPLY')), 'READBACK_UNCERTAIN')
+        self.assertEqual(self.previous.read_bytes(), ORIGINAL)
+        self.assertEqual(stat.S_IMODE(self.previous.stat().st_mode), 0o600)
+        self.assertEqual(self.candidate.stat().st_ino, self.target.stat().st_ino)
+        self.target.write_bytes(b'corrupted bytes on exact installed inode')
+        self.assertEqual(receiver.handle(request('ROLLBACK')), 'PREIMAGE_REFUSED')
+        self.assertEqual(receiver.handle(request('RECOVER')), 'RECOVERED')
+        self.assert_target(ORIGINAL)
+        self.assertFalse(self.candidate.exists())
+
+    def test_recover_never_overwrites_third_inode_or_accepts_tampered_backup(self):
+        self.assertEqual(receiver.handle(request('APPLY')), 'APPLIED')
+        self.previous.write_bytes(b'bad previous')
+        self.assertEqual(receiver.handle(request('RECOVER')), 'RECOVERY_REFUSED')
+        self.assert_target(UPDATED)
+        self.previous.write_bytes(ORIGINAL)
+        self.target.unlink()
+        self.target.write_bytes(UPDATED)
+        self.target.chmod(0o750)
+        third = self.target.stat().st_ino
+        self.assertEqual(receiver.handle(request('RECOVER')), 'RECOVERY_REFUSED')
+        self.assertEqual(self.target.stat().st_ino, third)
+        self.assert_target(UPDATED)
+
+    def test_nonprivate_recovery_directory_blocks_apply_before_target_change(self):
+        self.state.chmod(0o750)
+        self.assertEqual(receiver.handle(request('APPLY')), 'RECOVERY_REFUSED')
+        self.assert_target(ORIGINAL)
+        self.assertFalse(self.previous.exists())
 
     def test_main_returns_only_closed_json(self):
         output = io.StringIO()
