@@ -63,6 +63,15 @@ class ProducerTests(unittest.TestCase):
             self.assertEqual(producer.reason(error),'INTERNAL_REFUSED')
         self.assertNotIn('PRIVATE',str(result))
 
+    def test_worker_publisher_root_unknown_or_changed_rejected_before_hello(self):
+        identity=(1,10,('net:[1]','mnt:[2]','pid:[1]'),(1,1))
+        snapshot=({},None,None,((40,identity,(33,33,33,33)),),(1000,1000))
+        kernel=type('K',(),{'ns':{'_php_endpoint_identity':lambda p,d:identity,
+            '_manifest_worker_uid':lambda p,o,d:(33,33,33,33)}})()
+        self.assertEqual(producer.worker_from_peer(snapshot,(40,33,33),kernel,1),40)
+        for credentials in ((40,0,0),(40,1000,1000),(41,33,33),(40,34,34)):
+            with self.assertRaises(Rejected):producer.worker_from_peer(snapshot,credentials,kernel,1)
+
     def test_actual_fastcgi_request_fixed_script_no_body_and_bounded_drain(self):
         root,php=socket.socketpair();observed=[]
         def peer():

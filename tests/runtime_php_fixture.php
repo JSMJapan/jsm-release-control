@@ -10,7 +10,7 @@ function rejected(callable $test): void { try { $test(); } catch (\Throwable $e)
 
 foreach (["<?php return ['x'=>[true,false,null,1,1.2,-1,__DIR__. '/test']];", "<?php return ['x'=>dirname(dirname(__DIR__)), 'y'=>YII_DEBUG ? 3 : 0];"] as $raw) { configShape($raw); }
 foreach (["<?php file_put_contents('PRIVATE','x'); return [];", "<?php return ['x'=>getenv('PRIVATE')];", "<?php return ['x'=>new PDO('PRIVATE')];", "<?php return []; echo 'PRIVATE';", "<?php return ['x'=>function(){}];", "<?php return ['x'=>\$secret];"] as $raw) { rejected(static function() use ($raw) { configShape($raw); }); }
-generatedConfig('<?php $vendorDir = dirname(__DIR__); $baseDir = dirname($vendorDir); return [\"x\"=>$vendorDir.\"/x\"];','/srv/app');
+generatedConfig('<?php $vendorDir = dirname(__DIR__); $baseDir = dirname($vendorDir); return ["x"=>$vendorDir."/x"];','/srv/app');
 generatedConfig('<?php return [];','/srv/app');
 $stamp=['dev'=>1,'ino'=>2,'mode'=>3,'uid'=>4,'gid'=>5,'nlink'=>1,'size'=>6,'mtime'=>7,'ctime'=>8,'atime'=>9];
 check(fileStamp($stamp)===fileStamp(array_merge($stamp,['atime'=>100])));

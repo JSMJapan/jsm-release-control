@@ -168,10 +168,22 @@ function applicationShape(array $config, array $extensions): void
             if (!is_string($key) || strpos($key,'on ')===0 || strpos($key,'as ')===0) { refuse('STARTUP_HOOK_REFUSED'); }
         }
     }
+    foreach (array_keys($components['log'] ?? []) as $key) {
+        if (!in_array($key,['class','traceLevel','targets'],true)) { refuse('STARTUP_HOOK_REFUSED'); }
+    }
+    if (isset($components['log']['traceLevel']) && (!is_int($components['log']['traceLevel']) || $components['log']['traceLevel']<0 || $components['log']['traceLevel']>5)) { refuse('STARTUP_HOOK_REFUSED'); }
     foreach (($components['log']['targets'] ?? []) as $definition) {
         if (!is_array($definition) || ltrim($definition['class'] ?? '', '\\')!=='yii\\log\\FileTarget') { refuse('STARTUP_HOOK_REFUSED'); }
         foreach (array_keys($definition) as $key) {
-            if (!is_string($key) || strpos($key,'on ')===0 || strpos($key,'as ')===0) { refuse('STARTUP_HOOK_REFUSED'); }
+            if (!in_array($key,['class','levels','except','categories','logVars','enabled','prefix','logFile'],true)) { refuse('STARTUP_HOOK_REFUSED'); }
+        }
+        if (($definition['logVars'] ?? [])!==[] || (isset($definition['enabled']) && !is_bool($definition['enabled']))
+            || (array_key_exists('prefix',$definition) && $definition['prefix']!==null)
+            || (isset($definition['logFile']) && $definition['logFile']!==APP_ROOT.'/api/runtime/logs/app.log')) { refuse('STARTUP_HOOK_REFUSED'); }
+        foreach (['levels','except','categories'] as $key) {
+            if (!isset($definition[$key])) { continue; }
+            if (!is_array($definition[$key])) { refuse('STARTUP_HOOK_REFUSED'); }
+            foreach ($definition[$key] as $value) { if (!is_string($value)) { refuse('STARTUP_HOOK_REFUSED'); } }
         }
     }
 }
@@ -208,6 +220,31 @@ function configuredApplication(int $publisher)
     $config=\yii\helpers\ArrayHelper::merge(require $root.'/common/config/main.php',require $root.'/common/config/main-local.php',
         require $root.'/api/config/main.php',require $root.'/api/config/main-local.php');
     applicationShape($config,$extensionDefinitions);
+    if (($config['basePath'] ?? null)!==APP_ROOT.'/api' || ($config['vendorPath'] ?? null)!==APP_ROOT.'/vendor'
+        || (isset($config['aliases']['@common']) && $config['aliases']['@common']!==APP_ROOT.'/common')) { refuse('MODEL_SOURCE_REFUSED'); }
     // Same complete definition and same standard constructor, never run().
     return new \yii\web\Application($config);
+}
+
+function loadModels(int $publisher): void
+{
+    if (\Yii::getAlias('@common')!==APP_ROOT.'/common') { refuse('MODEL_SOURCE_REFUSED'); }
+    $pins=['Blogs'=>'3a7abf27993e296c812095974c0a5304506a24dff0aab22e4272f35b02766961',
+           'Faq'=>'1466ddb683939ceb42cf75a7755cf511357543433588a6ab1317ea96fe969959',
+           'FaqGroup'=>'261f583f7a57f889c46ca6b369dc9d4449bf394fed78e80911ee5f768d51ce28'];
+    foreach ($pins as $name=>$expected) {
+        $class='common\\models\\'.$name;$path=APP_ROOT.'/common/models/'.$name.'.php';
+        if (class_exists($class,false)) { refuse('MODEL_SOURCE_REFUSED'); }
+        foreach (spl_autoload_functions() ?: [] as $loader) {
+            if (is_array($loader) && is_object($loader[0]) && get_class($loader[0])==='Composer\\Autoload\\ClassLoader') {
+                $selected=$loader[0]->findFile($class);
+                if ($selected!==false && realpath($selected)!==realpath($path)) { refuse('MODEL_SOURCE_REFUSED'); }
+            }
+        }
+        if (!hash_equals($expected,hash('sha256',checkedFile($path,$publisher)))) { refuse('MODEL_SOURCE_REFUSED'); }
+        // Explicit pinned include prevents a different lazy first-party class
+        // body being executed before ReflectionMethod verifies inherited getDb.
+        require $path;
+        if ((new \ReflectionClass($class))->getFileName()!==$path) { refuse('MODEL_SOURCE_REFUSED'); }
+    }
 }

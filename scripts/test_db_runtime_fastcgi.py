@@ -25,6 +25,14 @@ def params(values):
     return result
 
 
+def request_params(nonce,digest,channel):
+    return {'SCRIPT_FILENAME':SCRIPT,'SCRIPT_NAME':'/test_db_runtime_entry.php','PHP_SELF':'/test_db_runtime_entry.php',
+                    'DOCUMENT_ROOT':'/usr/local/libexec','REQUEST_URI':'/test_db_runtime_entry.php','REQUEST_METHOD':'POST','CONTENT_LENGTH':'0','QUERY_STRING':'',
+                    'SERVER_NAME':'develop.jsmjapan.com','SERVER_PROTOCOL':'HTTP/1.1','GATEWAY_INTERFACE':'CGI/1.1',
+                    'JSM_DB_PROBE':VERSION,'JSM_DB_NONCE':nonce,'JSM_DB_CONTEXT':digest,'JSM_DB_CHANNEL':channel}
+
+
+
 class FastCGI:
     """Only synthetic tests may supply a preconnected stream; no target input."""
     def __init__(self, nonce, digest, channel, deadline, stream=None, peer_check=None):
@@ -35,9 +43,7 @@ class FastCGI:
             self._timeout()
             if stream is None:self.stream.connect(SOCKET)
             if peer_check is not None:peer_check(self.stream)
-            values={'SCRIPT_FILENAME':SCRIPT,'REQUEST_METHOD':'POST','CONTENT_LENGTH':'0','QUERY_STRING':'',
-                    'SERVER_NAME':'develop.jsmjapan.com','SERVER_PROTOCOL':'HTTP/1.1','GATEWAY_INTERFACE':'CGI/1.1',
-                    'JSM_DB_PROBE':VERSION,'JSM_DB_NONCE':nonce,'JSM_DB_CONTEXT':digest,'JSM_DB_CHANNEL':channel}
+            values=request_params(nonce,digest,channel)
             packet=record(1,struct.pack('!HB5x',1,0))+record(4,params(values))+record(4)+record(5)
             self.stream.sendall(packet)
             self.thread=threading.Thread(target=self._drain,daemon=True);self.thread.start()

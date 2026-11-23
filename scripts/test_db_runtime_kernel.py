@@ -15,6 +15,7 @@ from test_db_docker_metadata import LIBRARY as DOCKER_LIBRARY, project_discovery
 from test_db_docker_binding import LIBRARY as BINDING_LIBRARY
 from test_php_manifest_readonly import OBSERVATION as MANIFEST_LIBRARY
 from test_db_runtime_protocol import Rejected, canonical
+from test_db_runtime_proc import read_tcp
 
 MAX_CGROUP_PIDS = 16
 MYSQL_EXES = ('/usr/sbin/mysqld', '/usr/sbin/mariadbd', '/usr/local/mysql/bin/mysqld')
@@ -159,18 +160,20 @@ class Kernel:
 
     def tcp(self, pid, role='DB'):
         try:
-            return self._tcp(pid)
+            return self._tcp(pid,role)
         except ValueError as error:
             known=('FD_ENTRY_LIMIT','FD_NAME_REFUSED','FD_TARGET_LIMIT','FD_DISAPPEARED','FD_ACCESS_REFUSED','FD_IO_REFUSED')
             if role in ('DB','PHP','PROXY') and len(error.args)==1 and error.args[0] in known:
                 raise Rejected(role+'_'+error.args[0]) from None
             raise
 
-    def _tcp(self, pid):
+    def _tcp(self, pid, role):
         owned = self.ns['_fd_sockets'](pid, self.deadline)
+        expected=MYSQL_EXES if role=='DB' else (PROXY_EXE,)
+        identity=(lambda:self.ns['_php_endpoint_identity'](pid,self.deadline)) if role=='PHP' else (lambda:self.identity(pid,expected))
         result = {}
         for suffix, size in (('tcp', 4), ('tcp6', 16)):
-            rows = tcp_rows(self.ns['_proc_read']('/proc/'+str(pid)+'/net/'+suffix, self.deadline),
+            rows = tcp_rows(read_tcp(pid,suffix,self.deadline,self.ns,identity),
                             size, owned, self.ns['_php_peer_address'], self.check)
             if result.keys() & rows.keys():
                 raise Rejected('TCP_REFUSED')

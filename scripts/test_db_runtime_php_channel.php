@@ -51,7 +51,7 @@ function privateEntry(): void
         if (!@socket_set_option($socket,SOL_SOCKET,SO_SNDTIMEO,['sec'=>0,'usec'=>750000])
             || !@socket_connect($socket,"\0jsm-db-2760-".$_SERVER['JSM_DB_CHANNEL'])) { refuse('CHANNEL_REFUSED'); }
         $wire=new PrivateWire($socket,$_SERVER['JSM_DB_NONCE'],$_SERVER['JSM_DB_CONTEXT'],hrtime(true)/1e9+3);
-        phpDialogue($wire,static function(int $uid) { return connectionDefinition(configuredApplication($uid)); },
+        phpDialogue($wire,static function(int $uid) {  $app=configuredApplication($uid);loadModels($uid);return connectionDefinition($app); },
             __NAMESPACE__.'\\nativeConnect',__NAMESPACE__.'\\metadata');
     } finally { @socket_close($socket); }
 }
