@@ -227,7 +227,7 @@ def _certificate_pinned(pem, digest):
 
 '''
 
-_ROOT = r'''
+_ROOT_PREAMBLE = r'''
 import fcntl
 import json
 import os
@@ -239,9 +239,9 @@ import time
 
 _OPENSSL = '/usr/bin/openssl'
 _CRYPTO_ENV = dict(PATH='/usr/bin:/bin',LANG='C',LC_ALL='C',OPENSSL_CONF='/dev/null')
-_DIR_COMPONENTS = ('usr','local','sbin')
-_LEAF = 'jsm-sandbox-deploy'
-_CANARY = b'jsm-test-installer-cms-public-canary-v1'
+'''
+_DEPLOYER_PATH = "_DIR_COMPONENTS = ('usr','local','sbin')\n_LEAF = 'jsm-sandbox-deploy'\n"
+_ROOT_OPERATIONS = r'''_CANARY = b'jsm-test-installer-cms-public-canary-v1'
 
 
 def _remaining(deadline):
@@ -346,7 +346,8 @@ def _stamp(info):
 def _safe_mode(info):
     return info.st_uid == 0 and info.st_mode & (stat.S_IWGRP | stat.S_IWOTH) == 0
 
-
+'''
+_ROOT = _ROOT_PREAMBLE + _DEPLOYER_PATH + _ROOT_OPERATIONS + r'''
 def _parents(deadline):
     current = []
     try:
