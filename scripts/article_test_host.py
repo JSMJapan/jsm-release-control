@@ -32,6 +32,10 @@ def require(ok,reason='ARTICLE_HOST_REFUSED'):
 def until(deadline):require(time.monotonic()<deadline,'ARTICLE_STAGE_DEADLINE')
 
 
+def owned_file(info):
+    return stat.S_ISREG(info.st_mode) and info.st_uid==0 and info.st_nlink==1 and not info.st_mode&0o022
+
+
 def owned_directory(info,ingress):
     return stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode)==0o700 and info.st_uid==(10001 if ingress else 0)
 
@@ -108,7 +112,9 @@ def verify_container(docker,store,state,role,running=True):
     else:require(row['security'] in ([],None))
     binds={'/run/db-root':(str(store.path/'root.password'),False),'/run/root.cnf':(str(store.path/'root.cnf'),False)} if role=='db' else {
         '/run/article-secrets/reader':(str(store.path/'reader.password'),False),'/run/article-ingress':(str(store.path/'ingress'),True)}
-    expected_tmp={'/var/lib/mysql'} if role=='db' else {'/tmp'}
+    expected_options={'/var/lib/mysql':'rw,noexec,nosuid,nodev,size=512m'} if role=='db' else {'/tmp':'rw,noexec,nosuid,nodev,size=64m,mode=1777'}
+    require(row['tmpfs']==expected_options,'ARTICLE_MOUNT_REFUSED')
+    expected_tmp=set(expected_options)
     require(type(row['mounts']) is list and len(row['mounts'])==len(binds)+len(expected_tmp),'ARTICLE_MOUNT_REFUSED')
     seen=set()
     for item in row['mounts']:
@@ -219,7 +225,8 @@ def cleanup(store,state,docker,deadline):
                     docker.run(('image','rm',tag),seconds=20,limit=4096)
                     require(docker.image_id(tag) is None,'ARTICLE_CLEANUP_UNCONFIRMED')
             except Exception:failures.append('image')
-    if failures:raise HostRefused('ARTICLE_CLEANUP_UNCONFIRMED')
+    if failures or state['import_started'] and not state['import_complete']:
+        raise HostRefused('ARTICLE_CLEANUP_UNCONFIRMED')
     # Validate the complete deletion set before stopping expiry or deleting recovery controls.
     names=os.listdir(store.fd)
     for name in names:
@@ -239,7 +246,7 @@ def cleanup(store,state,docker,deadline):
             finally:os.close(directory)
         else:
             info=os.stat(name,dir_fd=store.fd,follow_symlinks=False)
-            require(stat.S_ISREG(info.st_mode) and info.st_uid==0 and info.st_nlink==1 and not info.st_mode&0o022)
+            require(owned_file(info))
     # Keep state+bundle+lock and active TTL if any data deletion or timer stop fails.
     for name in names:
         if name in ('state.json','bundle.pyz','lock'):continue
@@ -258,18 +265,29 @@ def cleanup(store,state,docker,deadline):
     return {'status':'CLEANED','run':store.run,'containers_removed':True,'owned_tags_removed':True}
 
 
-def stage(store,build,control_sha,bundle,deadline,docker_type=Docker):
-    """Caller has streamed the authenticated ZIP into the exclusively created owned run directory."""
-    require(os.geteuid()==0 and type(build) is Build and re.fullmatch('[0-9a-f]{40}',control_sha))
-    until(deadline);archive=store.path/'artifact.zip'
-    inspected=inspect_archive(archive,build);proof=verify_images(archive,inspected,deadline)
+def prepare(store,build,control_sha,bundle,deadline):
+    """Arm the same owned expiry before accepting any private archive byte."""
+    require(type(build) is Build and type(control_sha) is str and re.fullmatch('[0-9a-f]{40}',control_sha))
     now=int(time.time())
     state=dict(version=VERSION,run=store.run,control_sha=control_sha,build_sha=build.sha,
-        artifact_sha256=build.archive_sha256,bundle_sha256=sha256(bundle).hexdigest(),schema_sha256=inspected.schema_sha256,
-        seed_sha256=inspected.seed_sha256,images=[inspected.app_image,inspected.mysql_image],tags=list(build.tags),
-        containers={'db':None,'app':None},create_attempted={'db':False,'app':False},created=now,expires=now+TTL,timer='jsm-article-2760-expire-'+store.run,
-        timer_armed=False,import_started=False,import_complete=False)
-    store.save(state);store.write('bundle.pyz',bundle,0o444)
+        artifact_sha256=build.archive_sha256,bundle_sha256=sha256(bundle).hexdigest(),schema_sha256=None,
+        seed_sha256=None,images=[None,None],tags=list(build.tags),containers={'db':None,'app':None},
+        create_attempted={'db':False,'app':False},created=now,expires=now+TTL,
+        timer='jsm-article-2760-expire-'+store.run,timer_armed=False,import_started=False,import_complete=False,pending=True)
+    store.save(state);store.write('bundle.pyz',bundle,0o444);timer(store,state,deadline)
+    return state
+
+
+def stage(store,build,control_sha,bundle,deadline,docker_type=Docker):
+    """Receiver has armed pending expiry before streaming the private archive."""
+    require(os.geteuid()==0 and type(build) is Build and re.fullmatch('[0-9a-f]{40}',control_sha))
+    until(deadline);archive=store.path/'artifact.zip';state=store.read()
+    require(state['pending'] is True and state['timer_armed'] is True and state['build_sha']==build.sha
+        and state['artifact_sha256']==build.archive_sha256 and state['control_sha']==control_sha
+        and state['bundle_sha256']==sha256(bundle).hexdigest())
+    inspected=inspect_archive(archive,build);proof=verify_images(archive,inspected,deadline)
+    state.update(pending=False,schema_sha256=inspected.schema_sha256,seed_sha256=inspected.seed_sha256,
+        images=[inspected.app_image,inspected.mysql_image]);store.save(state)
     docker=None
     try:
         docker=docker_type(store.path,deadline)
@@ -281,7 +299,6 @@ def stage(store,build,control_sha,bundle,deadline,docker_type=Docker):
         store.write('root.cnf',('[client]\nuser=root\npassword='+root+'\n').encode(),0o444)
         store.write('reader.password',reader.encode(),0o444)
         os.mkdir('ingress',0o700,dir_fd=store.fd);os.chown(store.path/'ingress',10001,10001)
-        timer(store,state,deadline)
         state['import_started']=True;store.save(state)
         with image_stream(archive,inspected,deadline) as source:
             docker.run(('load','--quiet'),stream=source,seconds=120,input_limit=proof.docker_tar_bytes,limit=4096)

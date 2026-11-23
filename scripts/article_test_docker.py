@@ -27,7 +27,7 @@ FIELDS={'id':'.Id','image':'.Image','run':'(index .Config.Labels "'+LABEL+'")','
  'cpu':'.HostConfig.NanoCpus','pids':'.HostConfig.PidsLimit','privileged':'.HostConfig.Privileged',
  'readonly':'.HostConfig.ReadonlyRootfs','restart':'.HostConfig.RestartPolicy.Name','capdrop':'.HostConfig.CapDrop',
  'security':'.HostConfig.SecurityOpt','ports':'.HostConfig.PortBindings','pidmode':'.HostConfig.PidMode',
- 'ipcmode':'.HostConfig.IpcMode','mounts':'.Mounts','log':'.HostConfig.LogConfig','hosts':'.HostConfig.ExtraHosts'}
+ 'ipcmode':'.HostConfig.IpcMode','mounts':'.Mounts','log':'.HostConfig.LogConfig','hosts':'.HostConfig.ExtraHosts','tmpfs':'.HostConfig.Tmpfs'}
 FORMAT='{'+','.join('"'+k+'":{{json '+v+'}}' for k,v in FIELDS.items())+'}'
 
 
@@ -129,4 +129,4 @@ class Docker:
     def sql(self,identity,raw):
         require(ID.fullmatch(identity))
         return self.run(('exec','-i','--user','0',identity,'mysql','--defaults-extra-file=/run/root.cnf',
-            '--protocol=TCP','--host=127.0.0.1','--batch','--skip-column-names'),data=raw,seconds=4,limit=32768)
+            '--protocol=TCP','--host=127.0.0.1','--default-character-set=utf8mb4','--batch','--skip-column-names'),data=raw,seconds=4,limit=32768)

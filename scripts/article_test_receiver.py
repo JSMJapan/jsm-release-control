@@ -15,7 +15,7 @@ from apache_parity_bridge import strict_json
 from article_test_artifact import Build, ARCHIVE_LIMIT, SOURCE as SOURCE_SHA, TREE as SOURCE_TREE
 from article_test_state import Store, BASE, valid_run, canonical, trusted
 from article_test_docker import Docker
-from article_test_host import HostRefused, require, stage, cleanup
+from article_test_host import HostRefused, require, prepare, stage, cleanup
 
 MAGIC=b'JSM_ARTICLE_TEST_2760_V1\n'
 VERSION='jsm-article-test-receiver-v1'
@@ -90,7 +90,8 @@ def expire(bundle,run):
         with_store=Store(run);state=with_store.read()
         require(sha256(bundle).hexdigest()==state['bundle_sha256'] and int(time.time())>=state['expires'],'ARTICLE_EXPIRE_REFUSED')
         deadline=time.monotonic()+CLEANUP_SECONDS
-        return cleanup(with_store,state,Docker(with_store.path,deadline),deadline)
+        runner=Docker(with_store.path,deadline) if state['import_started'] or any(state['create_attempted'].values()) else None
+        return cleanup(with_store,state,runner,deadline)
     finally:
         if with_store is not None:with_store.close()
 
@@ -102,11 +103,14 @@ def perform(bundle,fd=0):
     try:
         store=Store(value['run'],create=value['operation']=='STAGE')
         if value['operation']=='STAGE':
+            prepare(store,pins(),value['control_sha'],bundle,min(started+10,overall))
             receive(fd,store,value,min(started+300,overall))
             result=stage(store,pins(),value['control_sha'],bundle,min(started+STAGE_SECONDS,overall))
         else:
             end_input(fd,min(started+10,overall))
-            state=store.read();result=cleanup(store,state,Docker(store.path,overall),overall)
+            state=store.read()
+            runner=Docker(store.path,overall) if state['import_started'] or any(state['create_attempted'].values()) else None
+            result=cleanup(store,state,runner,overall)
         return dict(version=VERSION,nonce=value['nonce'],euid=0,**result)
     except BaseException:
         # A failure before host stage has a state file only after its own creation intent was saved.
@@ -118,7 +122,7 @@ def perform(bundle,fd=0):
                     cleanup(store,state,runner,overall)
                 else:
                     for name in os.listdir(store.fd):
-                        require(name in ('artifact.zip','lock'),'ARTICLE_CLEANUP_UNCONFIRMED')
+                        require(name in ('artifact.zip','lock','state.tmp'),'ARTICLE_CLEANUP_UNCONFIRMED')
                         info=os.stat(name,dir_fd=store.fd,follow_symlinks=False)
                         require(trusted(info,stat.S_IFREG) and info.st_nlink==1,'ARTICLE_CLEANUP_UNCONFIRMED')
                         os.unlink(name,dir_fd=store.fd)

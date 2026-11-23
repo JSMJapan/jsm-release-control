@@ -14,7 +14,7 @@ BASE='/var/lib/jsm-article-test-2760'
 ROOT_UID=0
 VERSION='jsm-clean-article-2760-v1'
 TTL=7200
-FILES={'state.json','bundle.pyz','artifact.zip','root.password','root.cnf','reader.password','schema.sql','seed.sql',
+FILES={'state.tmp','state.json','bundle.pyz','artifact.zip','root.password','root.cnf','reader.password','schema.sql','seed.sql',
        'source.json','acceptance.json','app-image-id','mysql-image-id','build-commit','lock'}
 
 
@@ -36,13 +36,22 @@ def valid_run(run):return type(run) is str and re.fullmatch('[0-9a-f]{12}',run) 
 
 def record_valid(value,run):
     keys={'version','run','control_sha','build_sha','artifact_sha256','bundle_sha256','schema_sha256','seed_sha256',
-          'images','tags','containers','create_attempted','created','expires','timer','timer_armed','import_started','import_complete'}
+          'images','tags','containers','create_attempted','created','expires','timer','timer_armed','import_started','import_complete','pending'}
     if type(value) is not dict or set(value)!=keys or value.get('version')!=VERSION or value.get('run')!=run or not valid_run(run):return False
     for key in ('control_sha','build_sha'):
         if type(value.get(key)) is not str or re.fullmatch('[0-9a-f]{40}',value[key]) is None:return False
-    for key in ('artifact_sha256','bundle_sha256','schema_sha256','seed_sha256'):
+    if type(value.get('pending')) is not bool:return False
+    for key in ('artifact_sha256','bundle_sha256'):
         if type(value.get(key)) is not str or re.fullmatch('[0-9a-f]{64}',value[key]) is None:return False
-    if type(value.get('images')) is not list or len(value['images'])!=2 or any(type(x) is not str or not re.fullmatch('sha256:[0-9a-f]{64}',x) for x in value['images']):return False
+    if value['pending']:
+        if value.get('images')!=[None,None] or any(value.get(k) is not None for k in ('schema_sha256','seed_sha256')):return False
+        if value.get('import_started') is not False or value.get('import_complete') is not False:return False
+        if value.get('containers')!={'db':None,'app':None} or value.get('create_attempted')!={'db':False,'app':False}:return False
+    else:
+        for key in ('schema_sha256','seed_sha256'):
+            if type(value.get(key)) is not str or re.fullmatch('[0-9a-f]{64}',value[key]) is None:return False
+        if type(value.get('images')) is not list or len(value['images'])!=2 or any(type(x) is not str or not re.fullmatch('sha256:[0-9a-f]{64}',x) for x in value['images']):return False
+        if value['images'][0]==value['images'][1]:return False
     if value.get('tags')!=['jsm-article-test:'+value['build_sha'],'jsm-article-mysql:'+value['build_sha']]:return False
     if type(value.get('containers')) is not dict or set(value['containers'])!={'db','app'}:return False
     if any(x is not None and (type(x) is not str or re.fullmatch('[0-9a-f]{64}',x) is None) for x in value['containers'].values()):return False
@@ -95,8 +104,21 @@ class Store:
             return (info.st_dev,info.st_ino,len(raw),sha256(raw).hexdigest())
         finally:os.close(fd)
 
+    def discard_tmp(self):
+        try:info=os.stat('state.tmp',dir_fd=self.fd,follow_symlinks=False)
+        except FileNotFoundError:return
+        require(trusted(info,stat.S_IFREG) and info.st_nlink==1 and info.st_size<=16384)
+        fd=os.open('state.tmp',os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=self.fd)
+        try:
+            actual=os.fstat(fd)
+            require((actual.st_dev,actual.st_ino,actual.st_mode,actual.st_uid,actual.st_nlink,actual.st_size)==
+                    (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_nlink,info.st_size))
+            os.unlink('state.tmp',dir_fd=self.fd)
+        finally:os.close(fd)
+
     def save(self,value):
         require(record_valid(value,self.run));raw=canonical(value);require(len(raw)<=16384)
+        self.discard_tmp()
         fd=os.open('state.tmp',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=self.fd)
         try:
             require(os.write(fd,raw)==len(raw));os.fsync(fd)
@@ -104,6 +126,17 @@ class Store:
         os.replace('state.tmp','state.json',src_dir_fd=self.fd,dst_dir_fd=self.fd);os.fsync(self.fd)
 
     def read(self):
+        try:os.stat('state.json',dir_fd=self.fd,follow_symlinks=False)
+        except FileNotFoundError:
+            # A complete first save can be recovered; an incomplete one admits no resources.
+            fd=os.open('state.tmp',os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=self.fd)
+            try:
+                info=os.fstat(fd);require(trusted(info,stat.S_IFREG) and info.st_nlink==1 and info.st_size<=16384)
+                raw=os.read(fd,16385);value=strict_json(raw.decode('ascii'))
+                require(canonical(value)==raw and record_valid(value,self.run))
+            finally:os.close(fd)
+            os.rename('state.tmp','state.json',src_dir_fd=self.fd,dst_dir_fd=self.fd);os.fsync(self.fd)
+        else:self.discard_tmp()
         fd=os.open('state.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=self.fd)
         try:
             info=os.fstat(fd);require(trusted(info,stat.S_IFREG) and info.st_nlink==1 and info.st_size<=16384)

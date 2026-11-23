@@ -18,7 +18,7 @@ def record(run):
     return dict(version=s.VERSION,run=run,control_sha='a'*40,build_sha='b'*40,artifact_sha256='c'*64,
         bundle_sha256='d'*64,schema_sha256='e'*64,seed_sha256='f'*64,images=['sha256:'+'a'*64,'sha256:'+'b'*64],
         tags=['jsm-article-test:'+'b'*40,'jsm-article-mysql:'+'b'*40],containers={'db':None,'app':None},create_attempted={'db':False,'app':False},created=10,
-        expires=10+s.TTL,timer='jsm-article-2760-expire-'+run,timer_armed=False,import_started=False,import_complete=False)
+        expires=10+s.TTL,timer='jsm-article-2760-expire-'+run,timer_armed=False,import_started=False,import_complete=False,pending=False)
 
 
 class HostBoundaryTests(unittest.TestCase):
@@ -61,5 +61,25 @@ class HostBoundaryTests(unittest.TestCase):
                 with self.assertRaises(s.StateRefused):store.write('private.env',b'CANARY-PRIVATE')
             finally:store.close()
             again=s.Store(run,base);again.close()
+
+    def test_interrupted_atomic_save_recovers_only_owned_temporary_file(self):
+        run='b'*12;value=record(run)
+        with tempfile.TemporaryDirectory() as directory,patch.object(s,'ROOT_UID',os.getuid()):
+            store=s.Store(run,Path(directory)/'state',create=True)
+            try:
+                store.save(value);temporary=store.path/'state.tmp';temporary.write_bytes(b'{"partial":')
+                store.save(value);self.assertFalse(temporary.exists());self.assertEqual(store.read(),value)
+                (store.path/'state.json').unlink();temporary.write_bytes(s.canonical(value))
+                self.assertEqual(store.read(),value);self.assertFalse(temporary.exists())
+                temporary.symlink_to(store.path/'state.json')
+                with self.assertRaises(s.StateRefused):store.save(value)
+                self.assertTrue(temporary.is_symlink());self.assertTrue((store.path/'state.json').exists())
+            finally:store.close()
+
+    def test_mysql_fixed_client_character_set_is_utf8mb4(self):
+        runner=d.Docker.__new__(d.Docker)
+        with patch.object(runner,'run',return_value=b'') as execute:
+            runner.sql('a'*64,b'SELECT 1;')
+        self.assertIn('--default-character-set=utf8mb4',execute.call_args.args[0])
 
 if __name__=='__main__':unittest.main()

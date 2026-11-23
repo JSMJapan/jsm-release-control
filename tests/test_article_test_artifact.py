@@ -17,7 +17,7 @@ class ArtifactTests(unittest.TestCase):
     def package(self,change=None):
         source=dict(status='SOURCE_INPUTS_VERIFIED',environment='TEST',source_commit='0184fcbc7bdbb0ca18da842532297bd12f3b557b',source_tree='b43fea383b8acfbda07562ee7a32fbc2fe98f05e')
         schema=b'CREATE TABLE synthetic_fixture (id INT);\n';seed=b'INSERT INTO synthetic_fixture VALUES (1);\n'
-        proof=dict(status='CI_NATIVE_PASS',network='LOOPBACK_ONLY',database='FIVE_SYNTHETIC_ROWS',grants='SELECT_TWO_TABLES',cleanup='VERIFIED',api=5,ssr=10,negative=8,
+        proof=dict(status='CI_NATIVE_PASS',network='LOOPBACK_ONLY',database='FIVE_SYNTHETIC_ROWS',grants='SELECT_TWO_TABLES',cleanup='VERIFIED',api=5,ssr=10,negative=8,browser_network='SEPARATE_LOOPBACK',react_handoffs=10,physical_device='NOT_TESTED',
                    schema_sha256=sha256(schema).hexdigest(),seed_sha256=sha256(seed).hexdigest())
         rows={'source.json':json.dumps(source).encode(),'schema.sql':schema,'seed.sql':seed,'acceptance.json':json.dumps(proof).encode(),
               'build-commit':b'a'*40+b'\n','app-image-id':b'sha256:'+b'b'*64+b'\n','mysql-image-id':b'sha256:'+b'c'*64+b'\n','images.tar.gz':b'synthetic compressed images'}
@@ -67,5 +67,17 @@ class ArtifactTests(unittest.TestCase):
             with self.assertRaises(ArtifactRefused):inspect_archive(path,build)
         for args in [('a'*40,True,'2','b'*64),('PRIVATE','1','2','b'*64),('a'*40,'1','2','PRIVATE')]:
             with self.assertRaises(ArtifactRefused):Build(*args)
+
+    def test_chromium_handoff_contract_is_closed_and_typed(self):
+        def mutate(field,value):
+            def change(rows):
+                proof=json.loads(rows['acceptance.json']);proof[field]=value;rows['acceptance.json']=json.dumps(proof).encode()
+            return change
+        for field,value in (('react_handoffs',10.0),('react_handoffs',True),('react_handoffs',9),
+                            ('browser_network','LOOPBACK_ONLY'),('physical_device','PASS'),('private','CANARY')):
+            raw,build=self.package(mutate(field,value))
+            with tempfile.TemporaryDirectory() as directory:
+                path=Path(directory)/'artifact.zip';path.write_bytes(raw)
+                with self.assertRaises(ArtifactRefused):inspect_archive(path,build)
 
 if __name__=='__main__':unittest.main()

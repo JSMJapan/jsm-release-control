@@ -23,7 +23,8 @@ IMAGE_LIMIT = 2*1024**3
 ARCHIVE_LIMIT = IMAGE_LIMIT+1024**2
 METADATA_LIMIT = 32768
 PROOF = dict(status='CI_NATIVE_PASS',network='LOOPBACK_ONLY',database='FIVE_SYNTHETIC_ROWS',
-             grants='SELECT_TWO_TABLES',cleanup='VERIFIED',api=5,ssr=10,negative=8)
+             grants='SELECT_TWO_TABLES',cleanup='VERIFIED',api=5,ssr=10,negative=8,
+             browser_network='SEPARATE_LOOPBACK',react_handoffs=10,physical_device='NOT_TESTED')
 
 
 class ArtifactRefused(ValueError):
@@ -119,7 +120,7 @@ def _inspect(file,build):
         expected=dict(PROOF,schema_sha256=listed['schema.sql'],seed_sha256=listed['seed.sql'])
         proof=strict_json(archive.read('acceptance.json').decode('utf-8'))
         # Equality alone conflates true/1; all native counters must be exact ints.
-        if type(proof) is not dict or proof!=expected or any(type(proof[k]) is not int for k in ('api','ssr','negative')):refuse()
+        if type(proof) is not dict or proof!=expected or any(type(proof[k]) is not int for k in ('api','ssr','negative','react_handoffs')):refuse()
         ids=[]
         for name in ('app-image-id','mysql-image-id'):
             text=archive.read(name).decode('ascii')

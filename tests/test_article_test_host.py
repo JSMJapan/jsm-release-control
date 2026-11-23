@@ -31,7 +31,8 @@ class Engine:
             network='none' if role=='db' else 'container:'+'d'*64,memory=h.MEMORY,swap=h.MEMORY,cpu=500000000,
             pids=128,privileged=False,readonly=role=='app',restart='no',capdrop=['CAP_NET_RAW'] if role=='db' else ['CAP_ALL'],
             security=None if role=='db' else ['no-new-privileges'],ports=None,hosts=None,pidmode='',ipcmode='private',
-            log={'Type':'json-file','Config':{'max-size':'2m','max-file':'1'}},mounts=[])
+            log={'Type':'json-file','Config':{'max-size':'2m','max-file':'1'}},mounts=[],
+            tmpfs={'/var/lib/mysql':'rw,noexec,nosuid,nodev,size=512m'} if role=='db' else {'/tmp':'rw,noexec,nosuid,nodev,size=64m,mode=1777'})
         for index,arg in enumerate(args):
             if arg=='--mount':
                 parts=args[index+1].split(',');values=dict(x.split('=',1) for x in parts if '=' in x)
@@ -75,14 +76,8 @@ class Engine:
 
 @contextmanager
 def fixture_cleanup():
-    original=h.os.stat
-    def owner(*args,**kwargs):
-        value=original(*args,**kwargs)
-        class Info:
-            def __getattr__(self,name):return getattr(value,name)
-            st_uid=0
-        return Info()
-    with patch.object(h,'command',return_value=b'') as commands,patch.object(h,'owned_directory',return_value=True),patch.object(h.os,'stat',side_effect=owner):
+    with patch.object(h,'command',return_value=b'') as commands,patch.object(h,'owned_directory',return_value=True),\
+         patch.object(h,'owned_file',side_effect=lambda info:info.st_uid==os.getuid() and info.st_nlink==1 and not info.st_mode&0o022):
         yield commands
 
 
@@ -107,6 +102,7 @@ class HostTests(unittest.TestCase):
         with patch.object(h,'cleanup',side_effect=recover),patch.object(h.os,'geteuid',return_value=0),patch.object(h.os,'chown'),patch.object(h,'resource_admission'),\
              patch.object(h,'timer',side_effect=arm),patch.object(h,'namespace',side_effect=ns),\
              patch.object(h,'command',return_value=b''),patch.object(smoke,'verify',side_effect=RuntimeError('PRIVATE-CANARY') if smoke_failure else None,return_value={'articles':5}):
+            h.prepare(store,build,'f'*40,b'synthetic-public-code',time.monotonic()+2)
             result=h.stage(store,build,'f'*40,b'synthetic-public-code',time.monotonic()+2,engine)
         return store,result
 
@@ -171,5 +167,21 @@ class HostTests(unittest.TestCase):
                 h.until(self.deadline);return super().run(args,**kwargs)
         with self.assertRaisesRegex(DockerRefused,'ARTICLE_STAGE_DEADLINE'):self.scenario(engine_type=Expired)
         self.assertEqual(Engine.latest.rows,{})
+
+    def test_partial_import_absent_tags_retains_recovery_and_never_claims_cleaned(self):
+        store,_=self.scenario();state=store.read();state['import_complete']=False;store.save(state)
+        engine=Engine.latest;engine.tags={tag:None for tag in state['tags']}
+        with fixture_cleanup() as commands:
+            with self.assertRaisesRegex(h.HostRefused,'ARTICLE_CLEANUP_UNCONFIRMED'):
+                h.cleanup(store,state,engine,time.monotonic()+2)
+            self.assertFalse(commands.called)
+        self.assertEqual(engine.rows,{})
+        self.assertTrue((store.path/'bundle.pyz').exists());self.assertTrue((store.path/'state.json').exists())
+        self.assertFalse(store.read()['import_complete'])
+
+    def test_stale_atomic_temp_does_not_prevent_whole_cleanup(self):
+        store,_=self.scenario();state=store.read();(store.path/'state.tmp').write_bytes(b'{"partial":')
+        with fixture_cleanup():result=h.cleanup(store,state,Engine.latest,time.monotonic()+2)
+        self.assertEqual(result['status'],'CLEANED');self.assertFalse(store.path.exists())
 
 if __name__=='__main__':unittest.main()
