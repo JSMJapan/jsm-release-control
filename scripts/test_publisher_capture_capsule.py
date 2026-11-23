@@ -103,8 +103,14 @@ def _capture(pem, digest, deadline):
             selected = occupied[0]
 
             phase = 'SOURCE_CHANGED'
-            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOATIME
-            source_fd = os.open(_WRAPPER_LEAF, flags, dir_fd=chains[selected][-1])
+            # O_PATH pins the entry without opening a replaced FIFO or device.
+            anchor = os.open(_WRAPPER_LEAF, os.O_PATH | os.O_NOFOLLOW, dir_fd=chains[selected][-1])
+            stack.callback(os.close, anchor)
+            _check_paths(chains, snapshot, selected, anchor, deadline)
+            # Only reopen the verified inode via our own descriptor; never reopen
+            # the path by name for reading or retry without O_NOATIME.
+            flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOATIME
+            source_fd = os.open('/proc/self/fd/' + str(anchor), flags)
             stack.callback(os.close, source_fd)
             _check_paths(chains, snapshot, selected, source_fd, deadline)
             data = bytearray()

@@ -30,11 +30,13 @@ WITNESS = (b'synthetic issuer and serial', 384, bytes(12), 1)
 class RecordingOs:
     """Delegate filesystem operations, recording only synthetic file access."""
     O_NOATIME = getattr(os, 'O_NOATIME', 1 << 30)
+    O_PATH = getattr(os, 'O_PATH', 1 << 29)
 
     def __init__(self, leaf, root):
         self.leaf = leaf
         self.root = root
         self.traversals = []
+        self.anchors = []
         self.opens = []
         self.reads = []
 
@@ -43,13 +45,21 @@ class RecordingOs:
 
     def open(self, path, flags, *args, **kwargs):
         if path == self.leaf:
+            self.anchors.append(flags)
+        elif path.startswith('/proc/self/fd/'):
             self.opens.append(flags)
+            if not hasattr(os, 'O_PATH'):
+                # Mac lacks the pinned Linux procfs open. Simulate it against
+                # the already opened local test descriptor, with no host I/O.
+                return os.dup(int(path.rsplit('/', 1)[1]))
         else:
             assert flags & os.O_DIRECTORY and flags & os.O_NOFOLLOW
             assert path in ('/', 'usr', 'local', 'sbin', 'bin')
             self.traversals.append(path)
             if path == '/':
                 path = self.root
+        if not hasattr(os, 'O_PATH') and flags & self.O_PATH:
+            flags = (flags & ~self.O_PATH) | os.O_NONBLOCK
         if not hasattr(os, 'O_NOATIME'):
             # Linux verifies the real flag and the actual atime, while this
             # local stand-in keeps the same source-path tests runnable on Mac.
@@ -157,7 +167,7 @@ class PublisherCapsuleTests(unittest.TestCase):
                 self.assertEqual(crypto, [FIXTURE])
                 self.assertEqual(len(recorded.opens), 1)
                 self.assertTrue(recorded.opens[0] & recorded.O_NOATIME)
-                self.assertTrue(recorded.opens[0] & os.O_NOFOLLOW)
+                self.assertEqual(recorded.anchors, [recorded.O_PATH | os.O_NOFOLLOW])
                 self.assertTrue({'sbin', 'bin'}.issubset(traversals))
                 if hasattr(os, 'O_NOATIME'):
                     self.assertEqual(leaves[selected].stat().st_atime_ns, before)
@@ -229,7 +239,7 @@ class PublisherCapsuleTests(unittest.TestCase):
         original_open = recorded.open
 
         def deny_atime_open(path, flags, *args, **kwargs):
-            if path == namespace['_WRAPPER_LEAF']:
+            if path.startswith('/proc/self/fd/'):
                 recorded.opens.append(flags)
                 raise PermissionError('synthetic O_NOATIME refusal')
             return original_open(path, flags, *args, **kwargs)
@@ -238,6 +248,25 @@ class PublisherCapsuleTests(unittest.TestCase):
         self.assertEqual(self.capture(fixture), ('SOURCE_CHANGED', None))
         self.assertEqual(len(recorded.opens), 1)
         self.assertTrue(recorded.opens[0] & recorded.O_NOATIME)
+        self.assertEqual(recorded.reads, [])
+        self.assertEqual(crypto, [])
+
+    def test_special_file_replacement_before_anchor_never_opens_for_reading(self):
+        fixture = self.fixture(('sbin',))
+        namespace, leaves, _, recorded, crypto = fixture
+        original_open = recorded.open
+
+        def substitute_fifo(path, flags, *args, **kwargs):
+            if path == namespace['_WRAPPER_LEAF']:
+                leaf = leaves['sbin']
+                leaf.unlink()
+                os.mkfifo(leaf)
+            return original_open(path, flags, *args, **kwargs)
+
+        recorded.open = substitute_fifo
+        self.assertEqual(self.capture(fixture), ('SOURCE_CHANGED', None))
+        self.assertEqual(recorded.anchors, [recorded.O_PATH | os.O_NOFOLLOW])
+        self.assertEqual(recorded.opens, [])
         self.assertEqual(recorded.reads, [])
         self.assertEqual(crypto, [])
 
