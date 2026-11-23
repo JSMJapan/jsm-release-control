@@ -34,6 +34,9 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - run: python3 -B -m unittest discover -s tests -p 'test_*.py'
+      - name: 'Import the integrated TEST report package offline'
+        if: ${{ hashFiles('scripts/test_db_control_report.py') != '' && hashFiles('scripts/test_db_runtime_producer.py') != '' }}
+        run: python3 -I -B scripts/test_db_control_report.py --verify-package
 
   provider:
     name: 'Read-only fixed VPS inventory'

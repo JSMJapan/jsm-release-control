@@ -168,6 +168,9 @@ class ControlLaunchTests(unittest.TestCase):
         for invalid, expected in ((compressed + bz2.compress(b'x'), pin), (compressed, '0' * 64)):
             with self.assertRaises(control.capsule.PackageRefused):
                 control.capsule.decode_package(base64.b64encode(invalid), len(raw), expected, package.pins)
+        for altered in (package.pins[:-1], package.pins + (('extra.py', 1, '0' * 64),)):
+            with self.assertRaises(control.capsule.PackageRefused):
+                control.capsule.decode_package(base64.b64encode(compressed), len(raw), pin, altered)
 
     def test_root_capsule_compiles_and_rejects_oversized_final_argument(self):
         context = control.authorize(Api(), self.env)
@@ -196,6 +199,47 @@ class ControlLaunchTests(unittest.TestCase):
             child = subprocess.run([sys.executable, '-I', '-B', '-S', '/proc/self/fd/' + str(fd)],
                                    pass_fds=(fd,), capture_output=True, check=True, timeout=3)
             self.assertEqual(child.stdout, b'sealed\n')
+
+    @unittest.skipUnless(sys.platform == 'linux' and hasattr(os, 'memfd_create'), 'Linux sealed memfd')
+    def test_offline_smoke_imports_packed_dependencies_without_invoking_producer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_fixture_sources(root)
+            producer = root / PRODUCER_SOURCE
+            valid = ('import test_db_runtime_preentry\n'
+                     'def collect_control(context, staging, deadline_ns):\n    raise AssertionError("runtime invoked")\n')
+            producer.write_text(valid)
+            control.verify_package(root)
+            producer.write_text('import missing_dependency_for_2760\n' + valid)
+            with self.assertRaises(subprocess.CalledProcessError):
+                control.verify_package(root)
+
+    def test_root_timeout_after_spawning_refuses_cleanup_and_withholds_success(self):
+        context = control.authorize(Api(), self.env)
+        demo = control.Package(b'fixture', ())
+        source = control.root_program(NONCE, context, demo).rsplit('\nprint(', 1)[0]
+        box = {}
+        exec(compile(source, '<synthetic capsule namespace>', 'exec'), box)
+        effects = []
+
+        @contextmanager
+        def fake_staging(root, nonce, files):
+            effects.append('staged')
+            try:
+                yield {'synthetic': True}
+            except box['DeferCleanup']:
+                effects.append('deferred')
+                raise box['CleanupUnconfirmed']() from None
+
+        box.update(os=types.SimpleNamespace(geteuid=lambda: 0), sys=types.SimpleNamespace(platform='linux'),
+                   signal=types.SimpleNamespace(signal=lambda *_: None, SIGTERM=15),
+                   decode_package=lambda *_: (b'fixture', {}), archive_descriptor=lambda *_: 10,
+                   staged_php=fake_staging, run_producer=Mock(side_effect=TimeoutError()))
+        result = box['root_receipt'](NONCE, context, b'', 0, '', ())
+        self.assertEqual(effects, ['staged', 'deferred'])
+        self.assertEqual(result['cleanup'], 'UNCONFIRMED')
+        self.assertEqual(result['transport_reason'], 'STAGING_CLEANUP_UNCONFIRMED')
+        self.assertIsNone(result['report'])
 
     def test_entry_uses_staging_and_absolute_deadline_and_refuses_bad_context(self):
         context = control.authorize(Api(), self.env)

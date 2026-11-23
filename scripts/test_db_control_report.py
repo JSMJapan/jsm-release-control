@@ -2,6 +2,7 @@
 import ast
 import base64
 import bz2
+from contextlib import ExitStack
 from dataclasses import dataclass
 from hashlib import sha256
 import inspect
@@ -9,6 +10,7 @@ import io
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 import time
 from zipfile import ZipFile, ZipInfo
@@ -162,6 +164,22 @@ def root_program(nonce, context, package):
     return source
 
 
+def verify_package(source_dir):
+    """Import the complete producer from the sealed archive, without running it."""
+    package = build_package(source_dir)
+    context = dict(scope=SCOPE, control_sha='a' * 40,
+                   run=_run('a' * 40, REFERENCE_SITE_SHA, '9' * 15, 1, RUN_ACTOR, RUN_ACTOR))
+    root_program('0' * 32, context, package)
+    with ExitStack() as resources:
+        archive = capsule.archive_descriptor(resources, package.archive)
+        smoke = ('import sys; sys.path.insert(0,sys.argv[1]); '
+                 'from test_db_runtime_producer import collect_control; '
+                 'import test_db_runtime_preentry; assert callable(collect_control)')
+        subprocess.run(['/usr/bin/python3', '-I', '-B', '-S', '-c', smoke, '/proc/self/fd/' + str(archive)],
+                       pass_fds=(archive,), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, env={'PATH': '/usr/bin:/bin', 'LANG': 'C'}, timeout=3, check=True)
+
+
 def project_remote(raw, nonce, context):
     try:
         need(type(raw) is bytes and 0 < len(raw) <= 4096, RECEIPT_REFUSED)
@@ -205,12 +223,21 @@ def collect(api, env, source_dir):
 
 
 def main():
+    source_dir = Path(__file__).resolve().parent
+    if sys.argv[1:] == ['--verify-package']:
+        try:
+            verify_package(source_dir)
+        except Exception:
+            print(BUNDLE_REFUSED)
+            return 1
+        print('TEST_CONTROL_PACKAGE_VERIFIED')
+        return 0
     try:
         need(len(sys.argv) == 1, CONTEXT_REFUSED)
         token = os.environ.pop('REPORT_GITHUB_TOKEN', '')
         need(re.fullmatch('[!-~]{1,4096}', token), CONTEXT_REFUSED)
         api = _GitHubGet(api_paths(os.environ.get('GITHUB_RUN_ID', '')), token)
-        result = collect(api, os.environ, Path(__file__).resolve().parent)
+        result = collect(api, os.environ, source_dir)
         print(canonical(result).decode('ascii'), end='')
         return int(result['status'] != 'OBSERVED')
     except Exception as error:
