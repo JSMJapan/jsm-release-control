@@ -25,10 +25,10 @@ class RuntimeProtocolTests(unittest.TestCase):
         with root, php:
             before = time.monotonic() + 3
             sender, receiver = Wire(root, self.nonce, self.digest, before), Wire(php, self.nonce, self.digest, before)
-            sender.send('ROOT', 0, {'stage': 'HELLO'})
-            self.assertEqual(receiver.receive('ROOT', 0), {'stage': 'HELLO'})
-            receiver.send('PHP', 1, {'stage': 'TARGET', 'same_db': True})
-            self.assertEqual(sender.receive('PHP', 1), {'stage': 'TARGET', 'same_db': True})
+            sender.send('ROOT', 0, {'stage': 'HELLO', 'publisher_uid': 1000})
+            self.assertEqual(receiver.receive('ROOT', 0), {'stage': 'HELLO', 'publisher_uid': 1000})
+            receiver.send('PHP', 1, {'stage':'TARGET','same_db':True,'host':'127.0.0.1','port':3306,'schema':'stand'})
+            self.assertEqual(sender.receive('PHP', 1), {'stage':'TARGET','same_db':True,'host':'127.0.0.1','port':3306,'schema':'stand'})
 
     def test_wrong_nonce_context_stage_and_replay_are_refused(self):
         raw = encode(self.nonce, self.digest, 'ROOT', 2, {'stage': 'OPEN'})
@@ -39,7 +39,7 @@ class RuntimeProtocolTests(unittest.TestCase):
                 decode(raw,nonce,digest,role,sequence)
 
     def test_duplicate_extra_noncanonical_and_oversized_closed(self):
-        raw = encode(self.nonce,self.digest,'PHP',1,{'stage':'TARGET'})
+        raw = encode(self.nonce,self.digest,'PHP',1,{'stage':'TARGET','same_db':True,'host':'127.0.0.1','port':3306,'schema':'stand'})
         values = [raw.replace(b'{',b'{"context":"PRIVATE",',1),raw+b'PRIVATE',
                   raw.replace(b'"sequence":1',b'"sequence":true'),b'x'*4097,
                   raw.replace(b'"stage":"TARGET"',b'"stage":NaN')]
@@ -51,7 +51,7 @@ class RuntimeProtocolTests(unittest.TestCase):
         a,b=socket.socketpair()
         with a,b:
             w=Wire(a,self.nonce,self.digest,time.monotonic()-1)
-            with self.assertRaisesRegex(Rejected,'^DEADLINE$'):w.send('ROOT',0,{'stage':'HELLO'})
+            with self.assertRaisesRegex(Rejected,'^DEADLINE$'):w.send('ROOT',0,{'stage':'HELLO','publisher_uid':1000})
 
     def test_context_is_supplied_not_fabricated_by_control_run(self):
         context={'scope':dict(_SCOPE),'run':dict(workflow_sha='a'*40,requested_site_sha='b'*40,
@@ -67,9 +67,9 @@ class RuntimeProtocolTests(unittest.TestCase):
             self.skipTest('PHP is unavailable on this local platform; Linux CI must execute it')
         probe=ROOT/'scripts/test_db_runtime_probe.php'
         self.assertEqual(subprocess.run([php,'-l',str(probe)],capture_output=True).returncode,0)
-        payload={'stage':'TARGET','same_db':True}
+        payload={'stage':'TARGET','same_db':True,'host':'127.0.0.1','port':3306,'schema':'stand'}
         raw=encode(self.nonce,self.digest,'PHP',1,payload)
-        code='require $argv[1]; echo \\JsmTestDbRuntime2760\\frame($argv[2],$argv[3],"PHP",1,["stage"=>"TARGET","same_db"=>true]);'
+        code='require $argv[1]; echo \\JsmTestDbRuntime2760\\frame($argv[2],$argv[3],"PHP",1,["stage"=>"TARGET","same_db"=>true,"host"=>"127.0.0.1","port"=>3306,"schema"=>"stand"]);'
         result=subprocess.run([php,'-r',code,str(probe),self.nonce,self.digest],capture_output=True)
         self.assertEqual(result.returncode,0)
         self.assertEqual(result.stdout,raw)

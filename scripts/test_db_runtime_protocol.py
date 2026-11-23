@@ -17,7 +17,11 @@ MAX_FRAME = 4096
 TOTAL_SECONDS = 3
 IO_SECONDS = .75
 ROLES = ('ROOT', 'PHP')
-STAGES = ('HELLO', 'TARGET', 'OPEN', 'CONNECTED', 'SELECT', 'RESULT', 'ABORT')
+STAGES = ('HELLO', 'TARGET', 'OPEN', 'CONNECTED', 'SELECT', 'RESULT', 'ABORT', 'REFUSED')
+PHP_REASONS = ('STARTUP_REFUSED','CONFIG_SHAPE_REFUSED','GENERATED_CONFIG_REFUSED','STARTUP_SOURCE_REFUSED',
+    'STARTUP_HOOK_REFUSED','STARTUP_CONTEXT_REFUSED','VENDOR_PROFILE_REFUSED','APPLICATION_REFUSED',
+    'DB_DEFINITION_REFUSED','PDO_ATTRIBUTE_REFUSED','PDO_CAPABILITY_REFUSED','PDO_AUTH_REFUSED',
+    'PDO_CONNECT_REFUSED','PDO_QUERY_REFUSED','METADATA_REFUSED','INTERNAL_REFUSED','DEADLINE')
 
 
 class Rejected(ValueError):
@@ -34,7 +38,8 @@ def context_digest(context):
     if (type(context) is not dict or set(context) != {'scope', 'run', 'control_sha'}
             or context['scope'] != dict(_SCOPE) or not _valid_run(context['run'])
             or context['run']['attempt'] != 1
-            or not re.fullmatch('[0-9a-f]{40}', context['control_sha'] or '')):
+            or type(context['control_sha']) is not str
+            or not re.fullmatch('[0-9a-f]{40}', context['control_sha'])):
         raise Rejected('CONTEXT_REQUIRED')
     return hashlib.sha256(canonical(context)).hexdigest()
 
@@ -51,10 +56,44 @@ def _tag(nonce, digest, role, sequence, payload):
                     + b'\0' + canonical(payload), hashlib.sha256).hexdigest()
 
 
+def payload_valid(role, sequence, value):
+    """No free-form objects/floats; PHP and Python sign exactly the same domain."""
+    if type(value) is not dict:
+        return False
+    stage = value.get('stage')
+    if role == 'ROOT':
+        if sequence == 0:
+            return (set(value) == {'stage', 'publisher_uid'} and stage == 'HELLO'
+                    and type(value['publisher_uid']) is int and 0 < value['publisher_uid'] <= 2147483647)
+        if sequence in (2, 4):
+            return set(value) == {'stage'} and stage in (('OPEN', 'ABORT') if sequence == 2 else ('SELECT', 'ABORT'))
+        if sequence == 6:
+            return (set(value) == {'stage', 'accepted'} and stage == 'RESULT'
+                    and type(value['accepted']) is bool)
+    if role == 'PHP':
+        if sequence in (1, 3, 5) and stage == 'REFUSED':
+            return set(value) == {'stage','reason'} and value['reason'] in PHP_REASONS
+        if sequence == 1:
+            return (set(value) == {'stage', 'host', 'port', 'schema', 'same_db'} and stage == 'TARGET'
+                    and value['host'] == '127.0.0.1' and type(value['port']) is int and 1 <= value['port'] <= 65535
+                    and type(value['schema']) is str and re.fullmatch('[A-Za-z0-9_]{1,64}', value['schema']) is not None
+                    and value['same_db'] is True)
+        if sequence == 3:
+            return set(value) == {'stage', 'native_pdo'} and stage == 'CONNECTED' and value['native_pdo'] is True
+        if sequence == 5:
+            return (set(value) == {'stage', 'schema_matches', 'principal_kind', 'version_family', 'server_read_only', 'query_count'}
+                    and stage == 'RESULT' and type(value['schema_matches']) is bool
+                    and value['principal_kind'] in ('ROOT', 'OTHER')
+                    and value['version_family'] in ('MYSQL_5_7', 'MYSQL_8', 'MARIADB', 'OTHER')
+                    and type(value['server_read_only']) is bool and type(value['query_count']) is int
+                    and value['query_count'] == 1)
+    return False
+
+
 def encode(nonce, digest, role, sequence, payload):
     if (type(digest) is not str or re.fullmatch('[0-9a-f]{64}', digest) is None
             or role not in ROLES or type(sequence) is not int or not 0 <= sequence <= 6
-            or type(payload) is not dict or payload.get('stage') not in STAGES):
+            or not payload_valid(role, sequence, payload)):
         raise Rejected('FRAME_REFUSED')
     try:
         result = canonical(dict(context=digest, role=role, sequence=sequence,
