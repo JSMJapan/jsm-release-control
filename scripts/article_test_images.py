@@ -119,6 +119,13 @@ class ImageProof:
     image_ids:tuple
     tags:tuple
     layers:int
+    config_ids:tuple
+    manifest_ids:tuple
+
+    @property
+    def aliases(self):
+        return tuple(tuple(dict.fromkeys(x for x in (native,config,manifest) if x is not None))
+            for native,config,manifest in zip(self.image_ids,self.config_ids,self.manifest_ids))
 
 
 def verify(path,inspected,deadline):
@@ -139,27 +146,53 @@ def _verify(path,inspected,deadline):
             inventory[name]=(entry.size,entry.isdir())
             if name in ('manifest.json','repositories','index.json','oci-layout'):
                 metadata[name]=strict_json(small(tar,entry).decode('utf-8'))
-            for image_id in images:
-                if config_path(name,image_id):
-                    raw=small(tar,entry);require(sha256(raw).hexdigest()==image_id[7:] and image_id not in configs)
-                    configs[image_id]=(name,strict_json(raw.decode('utf-8')))
     tar_bytes=limited.total
-    require(set(configs)==set(images) and type(metadata.get('manifest.json')) is list and len(metadata['manifest.json'])==2)
-    manifests=metadata['manifest.json'];references={};seen_tags=set();allowed=set(metadata)
-    by_tag={}
-    for image_id,expected_tag in zip(images,expected_tags):
-        name,cfg=configs[image_id];allowed.add(name)
+    manifests=metadata.get('manifest.json');require(type(manifests) is list and len(manifests)==2)
+    selected={};config_paths=set();allowed=set(metadata);by_tag={}
+    for row in manifests:
+        require(type(row) is dict and set(row)=={'Config','RepoTags','Layers'}
+                and type(row['RepoTags']) is list and len(row['RepoTags'])==1)
+        reference=tag(row['RepoTags'][0],expected_tags);require(reference not in selected)
+        name=row['Config'];require(type(name) is str and name in inventory and not inventory[name][1])
+        safe_name(name);require(re.fullmatch(r'(?:blobs/sha256/[0-9a-f]{64}|[0-9a-f]{64}\.json)',name))
+        require(name not in config_paths);config_paths.add(name);selected[reference]=row
+    require(set(selected)==set(expected_tags))
+    oci={};manifest_blobs={}
+    if 'index.json' in metadata or 'oci-layout' in metadata:
+        require(metadata.get('oci-layout')=={'imageLayoutVersion':'1.0.0'})
+        index=metadata.get('index.json');require(type(index) is dict and set(index)<= {'schemaVersion','mediaType','manifests'}
+                and index.get('schemaVersion')==2 and type(index.get('manifests')) is list and len(index['manifests'])==2)
+        for row in index['manifests']:
+            blob=descriptor(row);require(row.get('mediaType')=='application/vnd.oci.image.manifest.v1+json')
+            annotation=row.get('annotations')
+            require(type(annotation) is dict and set(annotation)<= {'io.containerd.image.name','org.opencontainers.image.ref.name',
+                    'org.opencontainers.image.created','containerd.io/distribution.source.docker.io'})
+            reference=tag(annotation.get('io.containerd.image.name'),expected_tags)
+            require(reference not in oci and annotation.get('org.opencontainers.image.ref.name',inspected.build.sha)==inspected.build.sha)
+            if 'org.opencontainers.image.created' in annotation:
+                require(type(annotation['org.opencontainers.image.created']) is str and re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z',annotation['org.opencontainers.image.created']))
+            if 'containerd.io/distribution.source.docker.io' in annotation:
+                require(reference==expected_tags[1] and annotation['containerd.io/distribution.source.docker.io']=='library/mysql')
+            require(blob in inventory and not inventory[blob][1] and inventory[blob][0]==row['size'])
+            oci[reference]=(blob,row);allowed.add(blob)
+        require(set(oci)==set(expected_tags))
+    wanted=config_paths|{blob for blob,_ in oci.values()}
+    with image_tar(path,inspected,deadline) as (tar,_):
+        for entry in tar:
+            if entry.name not in wanted:continue
+            raw=small(tar,entry);digest=sha256(raw).hexdigest()
+            require(config_path(entry.name,'sha256:'+digest));value=strict_json(raw.decode('utf-8'))
+            if entry.name in config_paths:configs[entry.name]=(value,'sha256:'+digest)
+            else:manifest_blobs[entry.name]=value
+    require(set(configs)==config_paths and set(manifest_blobs)=={blob for blob,_ in oci.values()})
+    references={};compressions={};config_ids=[];manifest_ids=[]
+    for image_id,reference in zip(images,expected_tags):
+        row=selected[reference];name=row['Config'];cfg,config_id=configs[name];allowed.add(name);config_ids.append(config_id)
         require(type(cfg) is dict and cfg.get('architecture')=='amd64' and cfg.get('os')=='linux')
         runtime=cfg.get('config');require(type(runtime) is dict)
-        if image_id==images[0]:
-            require(runtime.get('User')=='10001:10001' and runtime.get('Entrypoint')==['/app/start.sh']
-                    and runtime.get('Volumes') in (None,{}))
+        if reference==expected_tags[0]:
+            require(runtime.get('User')=='10001:10001' and runtime.get('Entrypoint')==['/app/start.sh'] and runtime.get('Volumes') in (None,{}))
         else:require(runtime.get('Volumes') in (None,{}, {'/var/lib/mysql':{}}))
-        found=[row for row in manifests if type(row) is dict and row.get('Config')==name]
-        require(len(found)==1);row=found[0]
-        require(set(row)=={'Config','RepoTags','Layers'} and type(row['RepoTags']) is list and len(row['RepoTags'])==1
-                and tag(row['RepoTags'][0],expected_tags)==expected_tag and expected_tag not in seen_tags)
-        seen_tags.add(expected_tag)
         layers=row['Layers'];rootfs=cfg.get('rootfs')
         require(type(layers) is list and len(layers)<=256 and type(rootfs) is dict and rootfs.get('type')=='layers'
                 and type(rootfs.get('diff_ids')) is list and len(layers)==len(rootfs['diff_ids']))
@@ -168,38 +201,31 @@ def _verify(path,inspected,deadline):
                     and type(diff) is str and re.fullmatch('sha256:[0-9a-f]{64}',diff))
             safe_name(layer);require(layer not in references or references[layer]==diff)
             references[layer]=diff;allowed.add(layer)
-        by_tag[expected_tag]=(name,tuple(layers))
+        manifest_id=None
+        if oci:
+            blob,desc=oci[reference];manifest_id=desc['digest'];manifest=manifest_blobs[blob]
+            require(type(manifest) is dict and set(manifest)<= {'schemaVersion','mediaType','config','layers','annotations'}
+                    and manifest.get('schemaVersion')==2 and manifest.get('mediaType')=='application/vnd.oci.image.manifest.v1+json'
+                    and type(manifest.get('layers')) is list)
+            # These bounded upstream annotations are data, never identity or execution inputs.
+            annotations=manifest.get('annotations',{})
+            known={'com.docker.official-images.bashbrew.arch','org.opencontainers.image.base.digest','org.opencontainers.image.base.name',
+                   'org.opencontainers.image.created','org.opencontainers.image.revision','org.opencontainers.image.source',
+                   'org.opencontainers.image.url','org.opencontainers.image.version'}
+            require(type(annotations) is dict and set(annotations)<=known and all(type(x) is str and len(x)<=2048 for x in annotations.values()))
+            require(descriptor(manifest['config'])==name and manifest['config'].get('mediaType')=='application/vnd.oci.image.config.v1+json'
+                    and manifest['config']['digest']==config_id and manifest['config']['size']==inventory[name][0]
+                    and tuple(descriptor(layer) for layer in manifest['layers'])==tuple(layers)
+                    and all(layer['size']==inventory[path][0] for layer,path in zip(manifest['layers'],layers)))
+            for layer in manifest['layers']:
+                kind=layer.get('mediaType');require(kind in ('application/vnd.oci.image.layer.v1.tar+gzip','application/vnd.oci.image.layer.v1.tar'))
+                layer_path=descriptor(layer);require(layer_path not in compressions or compressions[layer_path]==kind);compressions[layer_path]=kind
+        require(image_id in (config_id,manifest_id));manifest_ids.append(manifest_id)
+        by_tag[reference]=(name,tuple(layers))
     if 'repositories' in metadata:
         repositories=metadata['repositories'];require(type(repositories) is dict and set(repositories)=={'jsm-article-test','jsm-article-mysql'})
         for name,rows in repositories.items():
-            require(type(rows) is dict and set(rows)=={inspected.build.sha} and type(rows[inspected.build.sha]) is str
-                    and SHA.fullmatch(rows[inspected.build.sha]))
-    if 'index.json' in metadata or 'oci-layout' in metadata:
-        require(metadata.get('oci-layout')=={'imageLayoutVersion':'1.0.0'})
-        index=metadata.get('index.json');require(type(index) is dict and index.get('schemaVersion')==2
-                and type(index.get('manifests')) is list and len(index['manifests'])==2)
-        wanted={};oci_tags=set()
-        for row in index['manifests']:
-            blob=descriptor(row);annotations=row.get('annotations')
-            require(type(annotations) is dict and set(annotations)<= {'io.containerd.image.name','org.opencontainers.image.ref.name'})
-            names=[tag(value,expected_tags) for value in annotations.values()]
-            require(names and len(set(names))==1 and names[0] not in oci_tags)
-            oci_tags.add(names[0]);wanted[blob]=(row,names[0]);allowed.add(blob)
-        require(oci_tags==set(expected_tags))
-        with image_tar(path,inspected,deadline) as (tar,_):
-            for entry in tar:
-                if entry.name not in wanted:continue
-                desc,reference=wanted.pop(entry.name);raw=small(tar,entry)
-                require(sha256(raw).hexdigest()==desc['digest'][7:] and len(raw)==desc['size'])
-                manifest=strict_json(raw.decode('utf-8'))
-                require(type(manifest) is dict and set(manifest)<= {'schemaVersion','mediaType','config','layers','annotations'}
-                        and manifest.get('schemaVersion')==2 and type(manifest.get('layers')) is list
-                        and manifest.get('annotations') in (None,{}))
-                config,layers=by_tag[reference]
-                require(descriptor(manifest['config'])==config and manifest['config']['size']==inventory[config][0]
-                        and tuple(descriptor(layer) for layer in manifest['layers'])==layers
-                        and all(layer['size']==inventory[path][0] for layer,path in zip(manifest['layers'],layers)))
-        require(not wanted)
+            require(type(rows) is dict and set(rows)=={inspected.build.sha} and type(rows[inspected.build.sha]) is str and SHA.fullmatch(rows[inspected.build.sha]))
     # Legacy per-layer metadata is safe only inside a referenced layer directory.
     for layer in references:
         if layer.endswith('/layer.tar'):
@@ -218,6 +244,8 @@ def _verify(path,inspected,deadline):
                     part=self.prefix[:n] if n>=0 else self.prefix;self.prefix=self.prefix[len(part):]
                     tail=file.read(n-len(part) if n>=0 else n);stored.update(tail);stored_bytes+=len(tail)
                     return part+tail
+            if entry.name in compressions:
+                require((start==b'\x1f\x8b')==(compressions[entry.name]=='application/vnd.oci.image.layer.v1.tar+gzip'))
             stream=Prefix();wrapped=gzip.GzipFile(fileobj=stream,mode='rb') if start==b'\x1f\x8b' else stream
             digest=sha256();total=0
             while True:
@@ -231,4 +259,4 @@ def _verify(path,inspected,deadline):
     unpacked=sum(sizes[path] for _,layers in by_tag.values() for path in layers)
     require(unpacked<=TAR_LIMIT)
     # Include the full bounded gzip/TAR stream rather than only image payloads.
-    return ImageProof(tar_bytes,unpacked,images,expected_tags,len(references))
+    return ImageProof(tar_bytes,unpacked,images,expected_tags,len(references),tuple(config_ids),tuple(manifest_ids))

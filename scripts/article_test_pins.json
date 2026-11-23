@@ -1,9 +1,9 @@
 {
-  "status": "NOT_PINNED",
+  "status": "PINNED",
   "source_sha": "0184fcbc7bdbb0ca18da842532297bd12f3b557b",
   "source_tree": "b43fea383b8acfbda07562ee7a32fbc2fe98f05e",
-  "build_sha": null,
-  "run_id": null,
-  "artifact_id": null,
-  "archive_sha256": null
+  "build_sha": "b66fd853a55d62571e4e8cdba56a5d893aa0c1b9",
+  "run_id": "45194119662",
+  "artifact_id": "14828410357",
+  "archive_sha256": "10f6a777faab17afe38f0a7163cf142a264d14f98ca73234a33ab42aadeab769"
 }

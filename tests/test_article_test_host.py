@@ -26,7 +26,8 @@ class Engine:
     def create(self,args):
         self.calls.append(('create',args));role='db' if '--read-only' not in args else 'app'
         identity=('d' if role=='db' else 'e')*64;self.created.append(role)
-        run=args[args.index('--label')+1].split('=')[1];image=next(x for x in args if x.startswith('sha256:'))
+        run=args[args.index('--label')+1].split('=')[1];image=next(x for x in args if x.startswith('sha256:'));index=0 if role=='app' else 1
+        h.require(image==self.runtime_images[index]);image=self.container_ids[index]
         self.rows[identity]=dict(id=identity,image=image,run=run,pid=101 if role=='db' else 102,
             network='none' if role=='db' else 'container:'+'d'*64,memory=h.MEMORY,swap=h.MEMORY,cpu=500000000,
             pids=128,privileged=False,readonly=role=='app',restart='no',capdrop=['CAP_NET_RAW'] if role=='db' else ['CAP_ALL'],
@@ -40,7 +41,7 @@ class Engine:
             if arg=='--tmpfs':self.rows[identity]['mounts'].append(dict(Type='tmpfs',Destination=args[index+1].split(':')[0],RW=True))
         return identity
     def observe(self,identity,run,image):
-        row=self.rows[identity];h.require(row['run']==run and row['image']==image);return deepcopy(row)
+        row=self.rows[identity];h.require(row['run']==run and row['image'] in ((image,) if type(image) is str else image));return deepcopy(row)
     def start(self,identity):self.calls.append(('start',identity))
     def run(self,args,**kwargs):
         self.calls.append(args)
@@ -51,7 +52,7 @@ class Engine:
                 if not raw:break
                 size+=len(raw)
             h.require(size==kwargs['input_limit'])
-            self.tags={tag:identity for tag,identity in zip(self.tags,self.images)};return b''
+            self.tags={tag:identity for tag,identity in zip(self.tags,self.runtime_images)};return b''
         if args[0]=='rm':del self.rows[args[-1]];return b''
         if args[:2]==('image','rm'):self.tags[args[-1]]=None;return b''
         if args[:2]==('container','ls'):
@@ -82,13 +83,16 @@ def fixture_cleanup():
 
 
 class HostTests(unittest.TestCase):
-    def scenario(self,mutate=None,smoke_failure=False,engine_type=None):
-        raw,build=envelope();temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
+    def scenario(self,mutate=None,smoke_failure=False,engine_type=None,manifest_ids=False,tag_mode='native',container_mode='native'):
+        raw,build=envelope(oci=manifest_ids,manifest_ids=manifest_ids);temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
         owner=patch.object(s,'ROOT_UID',os.getuid());owner.start();self.addCleanup(owner.stop)
         store=s.Store('a'*12,Path(temporary.name)/'state',create=True);self.last_store=store;self.addCleanup(store.close)
         store.write('artifact.zip',raw)
         inspected=h.inspect_archive(store.path/'artifact.zip',build)
+        proof=h.verify_images(store.path/'artifact.zip',inspected,time.monotonic()+2)
         Engine.images=(inspected.app_image,inspected.mysql_image)
+        Engine.runtime_images=proof.image_ids if tag_mode=='native' else proof.config_ids if tag_mode=='config' else ('sha256:'+'f'*64,)*2
+        Engine.container_ids=proof.image_ids if container_mode=='native' else proof.config_ids if container_mode=='config' else ('sha256:'+'f'*64,)*2
         def arm(store,state,deadline):state['timer_armed']=True;store.save(state)
         ns=lambda pid:'net:[20]' if pid in (101,102) else 'net:[10]'
         engine=engine_type or Engine
@@ -169,8 +173,8 @@ class HostTests(unittest.TestCase):
         self.assertEqual(Engine.latest.rows,{})
 
     def test_partial_import_absent_tags_retains_recovery_and_never_claims_cleaned(self):
-        store,_=self.scenario();state=store.read();state['import_complete']=False;store.save(state)
-        engine=Engine.latest;engine.tags={tag:None for tag in state['tags']}
+        store,_=self.scenario();state=store.read();state['import_complete']=False;state['images']=[None,None];state['containers']={'db':None,'app':None};state['container_images']={'db':None,'app':None};state['create_attempted']={'db':False,'app':False};store.save(state)
+        engine=Engine.latest;engine.rows={};engine.tags={tag:None for tag in state['tags']}
         with fixture_cleanup() as commands:
             with self.assertRaisesRegex(h.HostRefused,'ARTICLE_CLEANUP_UNCONFIRMED'):
                 h.cleanup(store,state,engine,time.monotonic()+2)
@@ -183,5 +187,27 @@ class HostTests(unittest.TestCase):
         store,_=self.scenario();state=store.read();(store.path/'state.tmp').write_bytes(b'{"partial":')
         with fixture_cleanup():result=h.cleanup(store,state,Engine.latest,time.monotonic()+2)
         self.assertEqual(result['status'],'CLEANED');self.assertFalse(store.path.exists())
+
+    def test_manifest_config_aliases_cover_both_engine_tag_and_container_forms(self):
+        for tag_mode,container_mode in (('native','native'),('config','config'),('native','config'),('config','native')):
+            with self.subTest(tag=tag_mode,container=container_mode):
+                store,result=self.scenario(manifest_ids=True,tag_mode=tag_mode,container_mode=container_mode)
+                state=store.read();self.assertEqual(result['status'],'STAGED_LOCAL_ONLY')
+                self.assertEqual(state['images'],list(Engine.runtime_images))
+                self.assertEqual(state['container_images'],{'app':Engine.container_ids[0],'db':Engine.container_ids[1]})
+                self.assertNotEqual(state['artifact_images'],[pair[1] for pair in state['image_aliases']])
+                self.assertEqual(result['artifact_images'],state['artifact_images'])
+                with fixture_cleanup():self.assertEqual(h.cleanup(store,state,Engine.latest,time.monotonic()+2)['status'],'CLEANED')
+
+    def test_unknown_image_id_never_admits_creation_or_sql(self):
+        with self.assertRaises(h.HostRefused):self.scenario(manifest_ids=True,tag_mode='third')
+        self.assertEqual(Engine.latest.created,[])
+        self.assertFalse(any(call[0]=='sql' for call in Engine.latest.calls))
+        self.assertTrue((self.last_store.path/'state.json').exists())
+
+    def test_unknown_container_image_cannot_bypass_alias_binding(self):
+        with self.assertRaises(h.HostRefused):self.scenario(manifest_ids=True,tag_mode='config',container_mode='third')
+        self.assertFalse(any(call[0]=='sql' for call in Engine.latest.calls))
+        self.assertTrue((self.last_store.path/'state.json').exists())
 
 if __name__=='__main__':unittest.main()

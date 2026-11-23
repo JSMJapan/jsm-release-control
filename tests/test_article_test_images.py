@@ -29,7 +29,7 @@ def tar(rows,extra=None):
     return output.getvalue()
 
 
-def envelope(oci=False,change=None,extra=None):
+def envelope(oci=False,change=None,extra=None,manifest_ids=False,architecture="amd64"):
     def link(archive):
         info=tarfile.TarInfo('legitimate-layer-link');info.type=tarfile.SYMTYPE;info.linkname='hello';archive.addfile(info)
     layer=tar({'hello':b'synthetic'},link);diff=sha256(layer).hexdigest()
@@ -37,7 +37,7 @@ def envelope(oci=False,change=None,extra=None):
     layer_name='blobs/sha256/'+sha256(blob).hexdigest() if oci else diff+'/layer.tar'
     cfg=[];ids=[];names=[]
     for app in (True,False):
-        value=dict(architecture='amd64',os='linux',config=dict(User='10001:10001' if app else '',
+        value=dict(architecture=architecture,os='linux',config=dict(User='10001:10001' if app else '',
             Entrypoint=['/app/start.sh'] if app else ['/entrypoint.sh'],Volumes=None if app else {'/var/lib/mysql':{}}),
             rootfs=dict(type='layers',diff_ids=['sha256:'+diff]))
         raw=encoded(value);identity=sha256(raw).hexdigest();cfg.append(raw);ids.append('sha256:'+identity)
@@ -56,6 +56,7 @@ def envelope(oci=False,change=None,extra=None):
             descriptors.append(dict(mediaType='application/vnd.oci.image.manifest.v1+json',digest='sha256:'+digest,size=len(raw),
                 annotations={'io.containerd.image.name':'docker.io/library/'+tags[index]}))
         rows['index.json']=encoded(dict(schemaVersion=2,manifests=descriptors));rows['oci-layout']=encoded({'imageLayoutVersion':'1.0.0'})
+        if manifest_ids:ids=[row['digest'] for row in descriptors]
     if change:change(rows,manifest,ids)
     package=gzip.compress(tar(rows,extra),mtime=0)
     raw,build=artifact_fixture.ArtifactTests().package(lambda r:r.update({'images.tar.gz':package,
@@ -74,6 +75,16 @@ class ImagesTests(unittest.TestCase):
             raw,build=envelope(oci);proof=self.verify(raw,build)
             self.assertEqual(proof.layers,1);self.assertEqual(len(proof.image_ids),2)
             self.assertGreater(proof.layer_unpacked_bytes,0);self.assertLess(proof.layer_unpacked_bytes,images.TAR_LIMIT)
+
+    def test_oci_manifest_ids_are_linked_to_config_ids_without_relaxing_architecture(self):
+        raw,build=envelope(oci=True,manifest_ids=True);proof=self.verify(raw,build)
+        self.assertNotEqual(proof.image_ids,proof.config_ids)
+        self.assertEqual(proof.image_ids,proof.manifest_ids)
+        self.assertTrue(all(set(pair)=={native,config} for pair,native,config in zip(proof.aliases,proof.image_ids,proof.config_ids)))
+
+    def test_self_consistent_manifest_graph_with_wrong_architecture_still_refuses(self):
+        raw,build=envelope(oci=True,manifest_ids=True,architecture='arm64')
+        with self.assertRaises(images.ImageRefused):self.verify(raw,build)
 
     def test_third_tag_duplicate_or_foreign_tag_and_bad_image_config_refuse(self):
         def extra_tag(rows,manifest,ids):

@@ -114,9 +114,11 @@ class Docker:
             require(raw.strip()==b'','ARTICLE_NAME_COLLISION')
 
     def observe(self,identity,run,image):
-        require(type(identity) is str and ID.fullmatch(identity) and type(image) is str and IMAGE.fullmatch(image))
+        aliases=(image,) if type(image) is str else image
+        require(type(identity) is str and ID.fullmatch(identity) and type(aliases) is tuple and 1<=len(aliases)<=2
+            and all(type(x) is str and IMAGE.fullmatch(x) for x in aliases) and len(set(aliases))==len(aliases))
         value=strict_json(self.run(('container','inspect','--format',FORMAT,identity),limit=16384).decode('ascii'))
-        require(type(value) is dict and set(value)==set(FIELDS) and value['id']==identity and value['run']==run and value['image']==image)
+        require(type(value) is dict and set(value)==set(FIELDS) and value['id']==identity and value['run']==run and value['image'] in aliases)
         return value
 
     def create(self,args):

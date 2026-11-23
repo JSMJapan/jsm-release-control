@@ -96,8 +96,9 @@ def namespace(pid):
 
 def verify_container(docker,store,state,role,running=True):
     identity=state['containers'][role];require(type(identity) is str and ID.fullmatch(identity))
-    image=state['images'][0 if role=='app' else 1]
-    row=docker.observe(identity,store.run,image)
+    row=docker.observe(identity,store.run,tuple(state['image_aliases'][0 if role=='app' else 1]))
+    recorded=state['container_images'][role]
+    require(recorded is None or row['image']==recorded,'ARTICLE_IMAGE_ID_REFUSED')
     network='none' if role=='db' else 'container:'+state['containers']['db']
     require(row['network']==network and row['memory']==MEMORY and type(row['memory']) is int
         and row['swap']==MEMORY and type(row['swap']) is int and row['cpu']==500000000 and type(row['cpu']) is int
@@ -128,12 +129,14 @@ def verify_container(docker,store,state,role,running=True):
         require(type(row['pid']) is int and row['pid']>0,'ARTICLE_NAMESPACE_REFUSED')
         net=namespace(row['pid']);require(net!=namespace(os.getpid()),'ARTICLE_NAMESPACE_REFUSED')
         if role=='app':
-            db=docker.observe(state['containers']['db'],store.run,state['images'][1])
+            db=docker.observe(state['containers']['db'],store.run,tuple(state['image_aliases'][1]))
             require(net==namespace(db['pid']),'ARTICLE_NAMESPACE_REFUSED')
         raw=docker.run(('exec',identity,'cat','/proc/net/dev'),limit=4096)
         require(re.findall(rb'^\s*([a-zA-Z0-9_@.-]+):',raw,re.M)==[b'lo'],'ARTICLE_NAMESPACE_REFUSED')
         routes=docker.run(('exec',identity,'cat','/proc/net/route'),limit=4096).splitlines()
         require(bool(routes) and all(line.split()[0]==b'lo' for line in routes[1:] if line.split()),'ARTICLE_NAMESPACE_REFUSED')
+    if recorded is None:
+        state['container_images'][role]=row['image'];store.save(state)
     return row
 
 
@@ -208,20 +211,21 @@ def cleanup(store,state,docker,deadline):
                 present=docker.run(('container','ls','--all','--quiet','--no-trunc','--filter','id='+identity),limit=256).decode('ascii').splitlines()
                 require(present in ([],[identity]),'ARTICLE_CLEANUP_UNCONFIRMED')
                 if not present:
-                    state['containers'][role]=None;store.save(state);continue
-                docker.observe(identity,store.run,state['images'][0 if role=='app' else 1])
+                    state['containers'][role]=None;state['container_images'][role]=None;store.save(state);continue
+                row=docker.observe(identity,store.run,tuple(state['image_aliases'][0 if role=='app' else 1]))
+                require(state['container_images'][role] is None or row['image']==state['container_images'][role],'ARTICLE_CLEANUP_UNCONFIRMED')
                 docker.run(('rm','--force',identity),seconds=20,limit=256)
                 # ID-only readback; failure is not treated as absence.
                 rows=docker.run(('container','ls','--all','--quiet','--no-trunc','--filter','id='+identity),limit=256)
                 require(not rows.strip(),'ARTICLE_CLEANUP_UNCONFIRMED')
-                state['containers'][role]=None;store.save(state)
+                state['containers'][role]=None;state['container_images'][role]=None;store.save(state)
         except Exception:failures.append(role)
     if not failures and state['import_started']:
-        for tag,image in zip(state['tags'],state['images']):
+        for tag,aliases in zip(state['tags'],state['image_aliases']):
             try:
                 current=docker.image_id(tag)
                 if current is not None:
-                    require(current==image,'ARTICLE_CLEANUP_UNCONFIRMED')
+                    require(current in aliases,'ARTICLE_CLEANUP_UNCONFIRMED')
                     docker.run(('image','rm',tag),seconds=20,limit=4096)
                     require(docker.image_id(tag) is None,'ARTICLE_CLEANUP_UNCONFIRMED')
             except Exception:failures.append('image')
@@ -271,7 +275,7 @@ def prepare(store,build,control_sha,bundle,deadline):
     now=int(time.time())
     state=dict(version=VERSION,run=store.run,control_sha=control_sha,build_sha=build.sha,
         artifact_sha256=build.archive_sha256,bundle_sha256=sha256(bundle).hexdigest(),schema_sha256=None,
-        seed_sha256=None,images=[None,None],tags=list(build.tags),containers={'db':None,'app':None},
+        seed_sha256=None,images=[None,None],artifact_images=[None,None],image_aliases=[None,None],container_images={'db':None,'app':None},tags=list(build.tags),containers={'db':None,'app':None},
         create_attempted={'db':False,'app':False},created=now,expires=now+TTL,
         timer='jsm-article-2760-expire-'+store.run,timer_armed=False,import_started=False,import_complete=False,pending=True)
     store.save(state);store.write('bundle.pyz',bundle,0o444);timer(store,state,deadline)
@@ -287,7 +291,7 @@ def stage(store,build,control_sha,bundle,deadline,docker_type=Docker):
         and state['bundle_sha256']==sha256(bundle).hexdigest())
     inspected=inspect_archive(archive,build);proof=verify_images(archive,inspected,deadline)
     state.update(pending=False,schema_sha256=inspected.schema_sha256,seed_sha256=inspected.seed_sha256,
-        images=[inspected.app_image,inspected.mysql_image]);store.save(state)
+        artifact_images=[inspected.app_image,inspected.mysql_image],image_aliases=[list(x) for x in proof.aliases]);store.save(state)
     docker=None
     try:
         docker=docker_type(store.path,deadline)
@@ -302,8 +306,9 @@ def stage(store,build,control_sha,bundle,deadline,docker_type=Docker):
         state['import_started']=True;store.save(state)
         with image_stream(archive,inspected,deadline) as source:
             docker.run(('load','--quiet'),stream=source,seconds=120,input_limit=proof.docker_tar_bytes,limit=4096)
-        require([docker.image_id(tag) for tag in build.tags]==state['images'],'ARTICLE_IMAGE_ID_REFUSED')
-        state['import_complete']=True;store.save(state)
+        loaded=[docker.image_id(tag) for tag in build.tags]
+        require(all(type(identity) is str and identity in aliases for identity,aliases in zip(loaded,state['image_aliases'])),'ARTICLE_IMAGE_ID_REFUSED')
+        state['images']=loaded;state['import_complete']=True;store.save(state)
         create_role(docker,store,state,'db');initialize(docker,store,state,reader)
         create_role(docker,store,state,'app')
         from article_test_smoke import verify as smoke
@@ -312,6 +317,7 @@ def stage(store,build,control_sha,bundle,deadline,docker_type=Docker):
         # The serving Unix socket is local/private. A later approved ingress is required for phone QA.
         return dict(status='STAGED_LOCAL_ONLY',run=store.run,expires=state['expires'],build_sha=build.sha,
                     artifact_sha256=build.archive_sha256,app_image=state['images'][0],mysql_image=state['images'][1],
+                    artifact_images=state['artifact_images'],container_images=state['container_images'],
                     ingress='PRIVATE_UNIX_ONLY',qa='NOT_TESTED',local_smoke=smoke_result)
     except BaseException:
         try:

@@ -37,7 +37,7 @@ def collect(env):
     nonce=secrets.token_hex(16);bundle=package();program=outer_program(bundle,nonce)
     with tempfile.TemporaryDirectory(prefix='jsm-article-2760-') as folder:
         directory=Path(folder);os.chmod(directory,0o700)
-        identity=directory/'identity';hosts=directory/'known_hosts';archive=None;size=0;expected_images=None
+        identity=directory/'identity';hosts=directory/'known_hosts';archive=None;size=0;expected_images=None;expected_aliases=None
         private_file(identity,key.replace('\r\n','\n').rstrip('\n')+'\n');private_file(hosts,known)
         if operation=='STAGE':
             token=env.get('STOREFRONT_ACTIONS_READ_TOKEN')
@@ -45,10 +45,11 @@ def collect(env):
             api=_GitHubGet(artifact_paths(build),token=token);size=authorize_artifact(api,build)
             archive=directory/'artifact.zip'
             download(build,token,archive,size,time.monotonic()+300)
-            inspected=inspect_archive(archive,build);expected_images=(inspected.app_image,inspected.mysql_image);verify(archive,inspected,time.monotonic()+180)
+            inspected=inspect_archive(archive,build);expected_images=(inspected.app_image,inspected.mysql_image)
+            proof=verify(archive,inspected,time.monotonic()+180);expected_aliases=proof.aliases
         prefix=frame(operation,run,nonce,context['control_sha'],build,size)
         raw=transfer(ssh_command(identity,hosts,program),prefix,archive,time.monotonic()+720)
-        result=project(raw,nonce,operation,run,build,expected_images)
+        result=project(raw,nonce,operation,run,build,expected_images,expected_aliases)
     return dict(result,environment='ISOLATED_SYNTHETIC_TEST',resource='gce:dark-berm-508215-d2:asia-northeast1-a:150919059249400713',
         control_sha=context['control_sha'],workflow_run='https://github.com/JSMJapan/jsm-release-control/actions/runs/'+context['run_id'])
 

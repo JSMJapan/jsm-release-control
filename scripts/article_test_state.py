@@ -36,7 +36,7 @@ def valid_run(run):return type(run) is str and re.fullmatch('[0-9a-f]{12}',run) 
 
 def record_valid(value,run):
     keys={'version','run','control_sha','build_sha','artifact_sha256','bundle_sha256','schema_sha256','seed_sha256',
-          'images','tags','containers','create_attempted','created','expires','timer','timer_armed','import_started','import_complete','pending'}
+          'images','artifact_images','image_aliases','container_images','tags','containers','create_attempted','created','expires','timer','timer_armed','import_started','import_complete','pending'}
     if type(value) is not dict or set(value)!=keys or value.get('version')!=VERSION or value.get('run')!=run or not valid_run(run):return False
     for key in ('control_sha','build_sha'):
         if type(value.get(key)) is not str or re.fullmatch('[0-9a-f]{40}',value[key]) is None:return False
@@ -44,19 +44,29 @@ def record_valid(value,run):
     for key in ('artifact_sha256','bundle_sha256'):
         if type(value.get(key)) is not str or re.fullmatch('[0-9a-f]{64}',value[key]) is None:return False
     if value['pending']:
-        if value.get('images')!=[None,None] or any(value.get(k) is not None for k in ('schema_sha256','seed_sha256')):return False
+        if any(value.get(k)!=[None,None] for k in ('images','artifact_images','image_aliases')) or value.get('container_images')!={'db':None,'app':None} or any(value.get(k) is not None for k in ('schema_sha256','seed_sha256')):return False
         if value.get('import_started') is not False or value.get('import_complete') is not False:return False
         if value.get('containers')!={'db':None,'app':None} or value.get('create_attempted')!={'db':False,'app':False}:return False
     else:
         for key in ('schema_sha256','seed_sha256'):
             if type(value.get(key)) is not str or re.fullmatch('[0-9a-f]{64}',value[key]) is None:return False
-        if type(value.get('images')) is not list or len(value['images'])!=2 or any(type(x) is not str or not re.fullmatch('sha256:[0-9a-f]{64}',x) for x in value['images']):return False
-        if value['images'][0]==value['images'][1]:return False
+        aliases=value.get('image_aliases');artifact=value.get('artifact_images');runtime=value.get('images')
+        if type(aliases) is not list or len(aliases)!=2 or type(artifact) is not list or len(artifact)!=2 or type(runtime) is not list or len(runtime)!=2:return False
+        for pair,native,observed in zip(aliases,artifact,runtime):
+            if type(pair) is not list or not 1<=len(pair)<=2 or any(type(x) is not str or re.fullmatch('sha256:[0-9a-f]{64}',x) is None for x in pair) or len(set(pair))!=len(pair):return False
+            if type(native) is not str or native not in pair:return False
+            if observed is not None and (type(observed) is not str or observed not in pair):return False
+        if set(aliases[0])&set(aliases[1]):return False
+        if value.get('import_complete') is True and (value.get('import_started') is not True or any(x is None for x in runtime)):return False
+    if type(value.get('container_images')) is not dict or set(value['container_images'])!={'db','app'}:return False
+    for role,index in (('app',0),('db',1)):
+        observed=value['container_images'][role]
+        if observed is not None and (value['pending'] or type(observed) is not str or observed not in value['image_aliases'][index]):return False
     if value.get('tags')!=['jsm-article-test:'+value['build_sha'],'jsm-article-mysql:'+value['build_sha']]:return False
     if type(value.get('containers')) is not dict or set(value['containers'])!={'db','app'}:return False
     if any(x is not None and (type(x) is not str or re.fullmatch('[0-9a-f]{64}',x) is None) for x in value['containers'].values()):return False
     if type(value.get('create_attempted')) is not dict or set(value['create_attempted'])!={'db','app'} or any(type(x) is not bool for x in value['create_attempted'].values()):return False
-    if any(value['containers'][role] is not None and not value['create_attempted'][role] for role in ('db','app')):return False
+    if any(value['containers'][role] is not None and (not value['create_attempted'][role] or value['import_complete'] is not True) for role in ('db','app')):return False
     return (type(value.get('created')) is int and type(value.get('expires')) is int
             and value['expires']==value['created']+TTL and value.get('timer')=='jsm-article-2760-expire-'+run
             and type(value.get('timer_armed')) is bool and type(value.get('import_started')) is bool

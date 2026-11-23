@@ -19,14 +19,17 @@ from article_test_state import canonical
 
 
 class DeliveryTests(unittest.TestCase):
-    def test_real_pyz_loader_closure_and_not_pinned_refusal(self):
+    def test_real_pyz_loader_closure_and_typed_pin_admission(self):
         bundle=d.package();self.assertLess(len(bundle),131072)
         self.assertLess(len(d.outer_program(bundle,'a'*32).encode()),131071)
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'bundle.pyz';path.write_bytes(bundle)
-            script='import sys;sys.path.insert(0,sys.argv[1]);from article_test_receiver import pins\ntry:pins()\nexcept Exception as e:print(str(e))'
+            script='import sys;sys.path.insert(0,sys.argv[1]);from article_test_receiver import pins;print(pins().sha)'
             result=subprocess.run([sys.executable,'-I','-B','-c',script,str(path)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=2)
-            self.assertEqual(result.returncode,0);self.assertEqual(result.stdout,b'ARTIFACT_NOT_PINNED\n');self.assertEqual(result.stderr,b'')
+            self.assertEqual(result.returncode,0);self.assertEqual(result.stdout,(r.pins().sha+'\n').encode());self.assertEqual(result.stderr,b'')
+            unconfigured=json.loads((Path(__file__).resolve().parents[1]/'scripts/article_test_pins.json').read_text());unconfigured['status']='NOT_PINNED'
+            bad=Path(directory)/'unconfigured.json';bad.write_text(json.dumps(unconfigured))
+            with self.assertRaisesRegex(HostRefused,'ARTIFACT_NOT_PINNED'):r.pins(bad)
 
     def test_actual_header_typed_pins_and_truncated_or_extra_fields(self):
         build=Build('a'*40,'123','456','b'*64)
@@ -111,5 +114,19 @@ r.perform(b'public-cleanup-fixture')
                      patch.object(r,'Docker',side_effect=AssertionError('DOCKER_ON_PENDING')),fixture_cleanup():
                     result=r.expire(b'public-cleanup-fixture',run)
             self.assertEqual(result['status'],'CLEANED');self.assertFalse(path.exists())
+
+    def test_stage_receipt_separates_artifact_engine_and_container_image_forms(self):
+        build=Build('a'*40,'123','456','b'*64);native=('sha256:'+'a'*64,'sha256:'+'b'*64)
+        configs=('sha256:'+'c'*64,'sha256:'+'d'*64);aliases=tuple(zip(native,configs))
+        child=dict(version=r.VERSION,nonce='e'*32,euid=0,status='STAGED_LOCAL_ONLY',run='f'*12,expires=int(time.time())+7000,
+            build_sha=build.sha,artifact_sha256=build.archive_sha256,app_image=configs[0],mysql_image=native[1],artifact_images=list(native),
+            container_images={'app':native[0],'db':configs[1]},ingress='PRIVATE_UNIX_ONLY',qa='NOT_TESTED',
+            local_smoke={'articles':5,'real_404':2,'visibility':'BASIC_HTML_ONLY','browser_handoff':'CI_ONLY'})
+        def packet(value):return canonical(dict(version='jsm-article-test-outer-v1',nonce='e'*32,principal='marinagurina',euid=1001,root=value))
+        self.assertEqual(d.project(packet(child),'e'*32,'STAGE','f'*12,build,native,aliases)['status'],'STAGED_LOCAL_ONLY')
+        for changed in ({**child,'app_image':'sha256:'+'f'*64},
+                        {**child,'artifact_images':list(configs)},
+                        {**child,'container_images':{'app':'sha256:'+'f'*64,'db':configs[1]}}):
+            with self.assertRaises(HostRefused):d.project(packet(changed),'e'*32,'STAGE','f'*12,build,native,aliases)
 
 if __name__=='__main__':unittest.main()

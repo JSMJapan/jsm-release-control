@@ -142,7 +142,7 @@ def transfer(command,prefix,archive,deadline):
                 if stream is not None:stream.close()
 
 
-def project(raw,nonce,operation,run,build,expected_images=None):
+def project(raw,nonce,operation,run,build,expected_images=None,expected_aliases=None):
     require(type(raw) is bytes and len(raw)<=MAX_RECEIPT,'ARTICLE_RECEIPT_REFUSED')
     outer=strict_json(raw.decode('ascii'))
     require(type(outer) is dict and set(outer)=={'version','nonce','principal','euid','root'}
@@ -158,13 +158,16 @@ def project(raw,nonce,operation,run,build,expected_images=None):
             and value['nonce']==nonce and value['run']==run and value['status']=='CLEANED'
             and value['containers_removed'] is True and value['owned_tags_removed'] is True,'ARTICLE_RECEIPT_REFUSED')
     else:
-        require(type(expected_images) is tuple and len(expected_images)==2,'ARTICLE_RECEIPT_REFUSED')
-        require(set(value)=={'version','nonce','euid','status','run','expires','build_sha','artifact_sha256','app_image','mysql_image','ingress','qa','local_smoke'}
+        require(type(expected_images) is tuple and len(expected_images)==2 and type(expected_aliases) is tuple and len(expected_aliases)==2,'ARTICLE_RECEIPT_REFUSED')
+        require(set(value)=={'version','nonce','euid','status','run','expires','build_sha','artifact_sha256','app_image','mysql_image','artifact_images','container_images','ingress','qa','local_smoke'}
             and value['nonce']==nonce and value['run']==run and value['status']=='STAGED_LOCAL_ONLY'
             and value['build_sha']==build.sha and value['artifact_sha256']==build.archive_sha256
             and type(value['expires']) is int and int(time.time())<value['expires']<=int(time.time())+7200
             and all(type(value[k]) is str and re.fullmatch('sha256:[0-9a-f]{64}',value[k]) for k in ('app_image','mysql_image'))
-            and (value['app_image'],value['mysql_image'])==expected_images
+            and value['artifact_images']==list(expected_images)
+            and value['app_image'] in expected_aliases[0] and value['mysql_image'] in expected_aliases[1]
+            and type(value['container_images']) is dict and set(value['container_images'])=={'app','db'}
+            and value['container_images']['app'] in expected_aliases[0] and value['container_images']['db'] in expected_aliases[1]
             and value['ingress']=='PRIVATE_UNIX_ONLY' and value['qa']=='NOT_TESTED'
             and value['local_smoke']=={'articles':5,'real_404':2,'visibility':'BASIC_HTML_ONLY','browser_handoff':'CI_ONLY'},'ARTICLE_RECEIPT_REFUSED')
     return value
