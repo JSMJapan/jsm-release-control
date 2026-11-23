@@ -301,7 +301,12 @@ def _apply(operation):
             reporter = ()
             if operation != 'ROLLBACK':
                 phase = 'REPORTER_UNAVAILABLE'
-                reporter = _reporter(stack)
+                try:
+                    reporter = _reporter(stack)
+                except (OSError, ValueError, AttributeError):
+                    if operation != 'CHECK':
+                        return phase
+                    status = 'ORIGINAL_NO_REPORTER' if status == 'READY' else 'UPDATED_NO_REPORTER'
             phase = 'TARGET_REFUSED'
             _check_file(target)
             phase = 'LOCK_REFUSED'

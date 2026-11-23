@@ -162,6 +162,14 @@ class ReceiverTests(unittest.TestCase):
         self.assert_target(ORIGINAL)
         self.assertEqual(receiver.handle(request('ROLLBACK')), 'ALREADY_ORIGINAL')
 
+    def test_check_can_close_uncertainty_even_when_reporter_is_missing(self):
+        self.reporter.unlink()
+        self.assertEqual(receiver.handle(request('CHECK')), 'ORIGINAL_NO_REPORTER')
+        self.assert_target(ORIGINAL)
+        self.target.write_bytes(UPDATED)
+        self.assertEqual(receiver.handle(request('CHECK')), 'UPDATED_NO_REPORTER')
+        self.assert_target(UPDATED)
+
     def test_exact_preimage_and_replacement_digests_are_required(self):
         tampered = ORIGINAL[:-1] + b'!'
         self.target.write_bytes(tampered)

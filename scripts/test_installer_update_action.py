@@ -21,6 +21,7 @@ WORKFLOW = 'test-installer-update.yml'
 REPO_ENDPOINT = '/repos/' + REPO
 ENV_ENDPOINT = REPO_ENDPOINT + '/environments/' + ENVIRONMENT
 BRANCH_ENDPOINT = ENV_ENDPOINT + '/deployment-branch-policies'
+MAIN_ENDPOINT = REPO_ENDPOINT + '/branches/main'
 TARGET = 'gce:dark-berm-508215-d2:asia-northeast1-a:150919059249400713'
 RESULTS = {
     'CHECK': frozenset(('READY', 'ALREADY_APPLIED')),
@@ -58,12 +59,15 @@ def context(env):
     return operation
 
 
-def require_protected_writer(api):
+def require_protected_writer(api, approved_sha):
     try:
         repository = api.get_json(REPO_ENDPOINT)
         environment = api.get_json(ENV_ENDPOINT)
         branches = api.get_json(BRANCH_ENDPOINT)
         policy_ready(repository, environment, branches)
+        main = api.get_json(MAIN_ENDPOINT)
+        need(main.get('name') == 'main' and main.get('protected') is True
+             and main['commit']['sha'] == approved_sha, 'PROTECTED_WRITER_POLICY_REQUIRED')
         rules = [r for r in environment['protection_rules'] if r.get('type') == 'required_reviewers']
         reviewers = rules[0]['reviewers']
         need(environment.get('name') == ENVIRONMENT
@@ -123,7 +127,7 @@ def run_writer(env, operation):
 
 def collect(api, env):
     operation = context(env)
-    require_protected_writer(api)
+    require_protected_writer(api, env['GITHUB_SHA'])
     return operation, run_writer(env, operation)
 
 
@@ -134,7 +138,7 @@ def main():
         need(len(sys.argv) == 1, 'OWNER_MAIN_CONTEXT_REQUIRED')
         context(os.environ)
         result['workflow_sha'] = os.environ['GITHUB_SHA']
-        operation, status = collect(_GitHubGet((REPO_ENDPOINT, ENV_ENDPOINT, BRANCH_ENDPOINT)), os.environ)
+        operation, status = collect(_GitHubGet((REPO_ENDPOINT, ENV_ENDPOINT, BRANCH_ENDPOINT, MAIN_ENDPOINT)), os.environ)
         result.update(operation=operation, status=status)
         passed = status in RESULTS[operation]
     except Exception as error:

@@ -95,6 +95,15 @@ class ActionTests(unittest.TestCase):
             'TEST_INSTALLER_WRITE_SSH_KEY','TEST_INSTALLER_WRITE_KNOWN_HOSTS'})
         self.assertEqual(job['steps'][-1]['run'], 'python3 -I -B scripts/test_installer_update_action.py')
 
+    def test_forced_command_refuses_any_other_command(self):
+        script = ROOT / 'scripts' / 'test_installer_update_forced_command.sh'
+        for value in ('', 'OTHER', 'jsm-test-installer-update-v1 anything'):
+            with self.subTest(value=value):
+                refused = subprocess.run(['/bin/sh', script], input=b'ignored', capture_output=True,
+                    env={'SSH_ORIGINAL_COMMAND':value, 'PATH':'/usr/bin:/bin'}, timeout=3)
+                self.assertEqual(refused.returncode, 64)
+                self.assertEqual((refused.stdout,refused.stderr),(b'',b''))
+
     def test_invalid_context_never_gets_policy_or_transport(self):
         good = verified_context()
         self.assertEqual(action.context(good),'APPLY')
@@ -117,6 +126,27 @@ class ActionTests(unittest.TestCase):
             with self.assertRaisesRegex(action.Refused,'DEDICATED_WRITER_NOT_PROVISIONED'):
                 action.run_writer(dict(TEST_API_ADMIN_SSH_KEY='not-for-the-writer'),'CHECK')
             bounded.assert_not_called()
+
+    def test_current_main_must_be_protected_and_equal_the_approved_commit(self):
+        class Api:
+            def __init__(self, branch):
+                self.branch = branch
+
+            def get_json(self, path):
+                if path == action.MAIN_ENDPOINT:
+                    return self.branch
+                if path == action.ENV_ENDPOINT:
+                    return dict(name=action.ENVIRONMENT,
+                                protection_rules=[dict(type='required_reviewers',
+                                                       reviewers=[dict(reviewer=dict(id=327623967))])])
+                return {}
+
+        with patch.object(action, 'policy_ready'), patch.object(action, 'run_writer') as transport:
+            for branch in (dict(name='main', protected=False, commit=dict(sha=SHA)),
+                           dict(name='main', protected=True, commit=dict(sha='b' * 40))):
+                with self.assertRaisesRegex(action.Refused, 'PROTECTED_WRITER_POLICY_REQUIRED'):
+                    action.collect(Api(branch), verified_context())
+            transport.assert_not_called()
 
     def test_exact_remote_command_and_pin_before_transport(self):
         known = 'synthetic host key context'
