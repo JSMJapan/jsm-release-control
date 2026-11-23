@@ -183,6 +183,19 @@ class HostFixtureTests(unittest.TestCase):
         self.assertFalse(self.sudo.exists())
         self.assertTrue((self.root / 'var/lib').is_dir())
 
+    def test_changed_authorization_after_useradd_cannot_be_reported_as_bootstrapped(self):
+        def changed(_):
+            self.ns['_boot_account_absent'] = lambda: False
+            (self.home / '.ssh/authorized_keys').unlink()
+            replacement = self.root / 'replacement'
+            replacement.write_bytes(b'synthetic replacement')
+            replacement.replace(self.sudo)
+
+        self.ns['_boot_useradd'] = changed
+        self.assertEqual(self.apply(), 'STATE_UNCERTAIN')
+        self.assertEqual(self.sudo.read_bytes(), b'synthetic replacement')
+        self.assertFalse((self.home / '.ssh/authorized_keys').exists())
+
     def test_uncertain_account_creation_removes_its_key_and_privilege_without_repeating(self):
         def uncertain(_):
             self.ns['_boot_account_absent'] = lambda: False

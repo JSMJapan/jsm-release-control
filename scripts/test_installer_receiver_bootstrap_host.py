@@ -370,6 +370,9 @@ def _boot_apply(files, public_key, deadline):
             # whether an account/group transaction can safely be undone.
             account_started = True
             _boot_useradd(deadline)
+            _boot_recheck(anchors, deadline)
+            _boot_created_intact(created)
+            _boot_remaining(deadline)
             return 'BOOTSTRAPPED'
         except _BootUncertain:
             _boot_rollback(created)
