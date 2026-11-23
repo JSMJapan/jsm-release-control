@@ -1,0 +1,65 @@
+"""Real local subprocess/file boundary tests; never invoke Docker or a VM."""
+from copy import deepcopy
+from io import BytesIO
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from unittest.mock import patch
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
+import article_test_docker as d
+import article_test_state as s
+
+
+def record(run):
+    return dict(version=s.VERSION,run=run,control_sha='a'*40,build_sha='b'*40,artifact_sha256='c'*64,
+        bundle_sha256='d'*64,schema_sha256='e'*64,seed_sha256='f'*64,images=['sha256:'+'a'*64,'sha256:'+'b'*64],
+        tags=['jsm-article-test:'+'b'*40,'jsm-article-mysql:'+'b'*40],containers={'db':None,'app':None},created=10,
+        expires=10+s.TTL,timer='jsm-article-2760-expire-'+run,timer_armed=False,import_started=False,import_complete=False)
+
+
+class HostBoundaryTests(unittest.TestCase):
+    def test_real_pipe_nonreading_child_cannot_overrun_deadline(self):
+        runner=d.Docker.__new__(d.Docker);runner.config=Path('/synthetic');runner.deadline=time.monotonic()+2
+        actual=subprocess.Popen;children=[]
+        def spawn(*args,**kwargs):
+            child=actual([sys.executable,'-I','-c','import time;time.sleep(2)'],**kwargs);children.append(child);return child
+        started=time.monotonic()
+        with patch.object(d.subprocess,'Popen',spawn):
+            with self.assertRaisesRegex(d.DockerRefused,'ARTICLE_STAGE_DEADLINE'):
+                runner.run(('exec','synthetic'),data=b'x'*131072,seconds=.04)
+        self.assertLess(time.monotonic()-started,.5)
+        self.assertTrue(all(child.poll() is not None for child in children))
+
+    def test_real_stream_pipe_and_output_cap(self):
+        runner=d.Docker.__new__(d.Docker);runner.config=Path('/synthetic');runner.deadline=time.monotonic()+2
+        actual=subprocess.Popen
+        def spawn(*args,**kwargs):return actual([sys.executable,'-I','-c','import sys;sys.stdout.write(str(len(sys.stdin.buffer.read())))'],**kwargs)
+        with patch.object(d.subprocess,'Popen',spawn):
+            self.assertEqual(runner.run(('load',),stream=BytesIO(b'x'*200000),input_limit=200000),b'200000')
+            with self.assertRaises(d.DockerRefused):runner.run(('load',),stream=BytesIO(b'x'*200001),input_limit=200000)
+        def overflow(*args,**kwargs):return actual([sys.executable,'-I','-c','print("x"*100)'],**kwargs)
+        with patch.object(d.subprocess,'Popen',overflow):
+            with self.assertRaises(d.DockerRefused):runner.run(('info',),limit=16)
+
+    def test_closed_state_file_and_lock_ownership(self):
+        run='a'*12;value=record(run)
+        self.assertTrue(s.record_valid(value,run))
+        extra=deepcopy(value);extra['private_payload']='CANARY-PRIVATE'
+        self.assertFalse(s.record_valid(extra,run))
+        with tempfile.TemporaryDirectory() as directory,patch.object(s,'ROOT_UID',os.getuid()):
+            base=Path(directory)/'state';store=s.Store(run,base,create=True)
+            try:
+                store.save(value);self.assertEqual(store.read(),value)
+                with self.assertRaises(s.StateRefused):store.save(extra)
+                with self.assertRaises(s.StateRefused):s.Store(run,base)
+                store.write('root.password',b'synthetic-only',0o444)
+                with self.assertRaises(FileExistsError):store.write('root.password',b'replace')
+                with self.assertRaises(s.StateRefused):store.write('private.env',b'CANARY-PRIVATE')
+            finally:store.close()
+            again=s.Store(run,base);again.close()
+
+if __name__=='__main__':unittest.main()

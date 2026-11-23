@@ -46,7 +46,7 @@ class Limited:
 
 
 @contextmanager
-def image_tar(path,inspected,deadline):
+def image_stream(path,inspected,deadline):
     fd=None
     try:
         fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
@@ -56,20 +56,26 @@ def image_tar(path,inspected,deadline):
             file.seek(0)
             with ZipFile(file) as archive,archive.open('images.tar.gz') as member,gzip.GzipFile(fileobj=member,mode='rb') as uncompressed:
                 limited=Limited(uncompressed,TAR_LIMIT,deadline)
-                with tarfile.open(fileobj=limited,mode='r|') as tar:
-                    yield tar,limited
-                    require(not getattr(tar.fileobj,'buf',b'').strip(b'\0'))
-                # No hidden concatenated TAR/payload after the first envelope.
-                while True:
-                    tail=limited.read(65536)
-                    if not tail:break
-                    require(not tail.strip(b'\0'))
+                yield limited
+                require(limited.read(1)==b'')
             require(file_stamp(first)==file_stamp(os.fstat(file.fileno()))
                     and file_stamp(first)==file_stamp(os.stat(path,follow_symlinks=False)))
     except ImageRefused:raise
     except Exception:raise ImageRefused('ARTICLE_IMAGE_ENVELOPE_REFUSED') from None
     finally:
         if fd is not None:os.close(fd)
+
+
+@contextmanager
+def image_tar(path,inspected,deadline):
+    with image_stream(path,inspected,deadline) as limited:
+        with tarfile.open(fileobj=limited,mode='r|') as tar:
+            yield tar,limited
+            require(not getattr(tar.fileobj,'buf',b'').strip(b'\0'))
+        while True:
+            tail=limited.read(65536)
+            if not tail:break
+            require(not tail.strip(b'\0'))
 
 
 def safe_name(name):

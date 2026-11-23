@@ -108,4 +108,24 @@ class ActionsTests(unittest.TestCase):
             self.assertLess(time.monotonic()-started,.5)
         finally:response.close();client.close();thread.join()
 
+    def test_native_connection_close_exact_body_and_truncation(self):
+        payload=b'fixture';build=Build('a'*40,'123','456',sha256(payload).hexdigest())
+        for body,success in ((payload,True),(payload[:-1],False)):
+            client,server=socket.socketpair()
+            server.sendall(b'HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 7\r\n\r\n'+body)
+            server.close()
+            class Connection:
+                def __init__(self,host,**kwargs):self.host=host;self.sock=client if host!='api.github.com' else None
+                def request(self,*args,**kwargs):pass
+                def getresponse(self):
+                    if self.sock is None:return Response(302,[('Location','https://productionresultssa1.blob.core.windows.net/x')])
+                    response=self.response_class(self.sock);response.begin();return response
+                def close(self):
+                    if self.sock is not None:self.sock.close()
+            with tempfile.TemporaryDirectory() as directory:
+                operation=lambda:a.download(build,'synthetic-token',Path(directory)/'a',7,time.monotonic()+1,Connection)
+                if success:operation()
+                else:
+                    with self.assertRaises(a.ActionsRefused):operation()
+
 if __name__=='__main__':unittest.main()

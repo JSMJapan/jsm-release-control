@@ -209,7 +209,7 @@ def download(build,token,destination,expected_size,deadline,connection=http.clie
                 and not any(k.lower()=='transfer-encoding' or k.lower()=='content-encoding' and v.lower()!='identity' for k,v in rows),'PRIVATE_DOWNLOAD_REFUSED')
         fd=os.open(destination,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600)
         digest=sha256();total=0
-        while True:
+        while total<expected_size:
             left=deadline-time.monotonic();require(left>0,'PRIVATE_DOWNLOAD_DEADLINE')
             if body_socket is not None:body_socket.settimeout(min(15,left))
             raw=response.read1(min(65536,expected_size+1-total))
@@ -218,7 +218,7 @@ def download(build,token,destination,expected_size,deadline,connection=http.clie
             offset=0
             while offset<len(raw):
                 written=os.write(fd,raw[offset:]);require(written>0,'PRIVATE_DOWNLOAD_REFUSED');offset+=written
-        require(total==expected_size and digest.hexdigest()==build.archive_sha256,'PRIVATE_DOWNLOAD_REFUSED')
+        require(time.monotonic()<deadline and total==expected_size and digest.hexdigest()==build.archive_sha256,'PRIVATE_DOWNLOAD_REFUSED')
     except Exception as error:
         if type(error) is ActionsRefused:raise
         raise ActionsRefused('PRIVATE_DOWNLOAD_REFUSED') from None
