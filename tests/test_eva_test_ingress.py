@@ -34,7 +34,7 @@ class Fixture(BaseHTTPRequestHandler):
         self.server.rows.append((self.command, self.path, dict(self.headers), None))
         self.send_response_only(302)
         self.send_header('Location', '/ru/')
-        self.send_header('Set-Cookie', 'eva_teacher_test=synthetic; Secure; HttpOnly; SameSite=Strict; Path=' + BRIDGE)
+        self.send_header('Set-Cookie', 'eva_teacher_test=synthetic; Secure; HttpOnly; SameSite=Strict; Path=' + BRIDGE + '; Max-Age=300')
         self.send_header('Content-Length', '0')
         self.end_headers()
 

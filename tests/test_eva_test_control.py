@@ -244,3 +244,23 @@ class ContainerdTests(unittest.TestCase):
                 else:
                     self.assertEqual(images.verify(path, inspected, time.monotonic() + 3,
                                                    containerd_layer_sources=True).layers, 1)
+
+
+class BootstrapTests(unittest.TestCase):
+    def test_bootstrap_capsule_accepts_only_bound_new_account_and_key(self):
+        import base64
+        from eva_test_bootstrap import capsule, verified_key
+        payload = b'\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20' + b'x' * 32
+        text = 'ssh-ed25519 ' + base64.b64encode(payload).decode()
+        digest = sha256((text + '\n').encode()).hexdigest()
+        public = verified_key(text, digest)
+        with self.assertRaises(archive.EvaRefused):
+            verified_key(text + ' comment', digest)
+        with self.assertRaises(archive.EvaRefused):
+            verified_key(text, 'f' * 64)
+
+        # Inspect declarations and the package verifier without executing the host apply.
+        from test_api_installed_route_readonly import wrap_root_program
+        outer = wrap_root_program(NONCE, capsule(NONCE, public, SHA))
+        self.assertLess(len(outer), 119000)
+        compile(outer, '<synthetic outer>', 'exec')

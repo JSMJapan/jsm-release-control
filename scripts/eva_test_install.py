@@ -21,6 +21,8 @@ from article_test_images import verify
 from article_test_state import canonical, valid_run
 from eva_test_actions import REPO, artifact_paths, authorize, authorize_artifact, control_paths
 from eva_test_archive import EvaRefused, inspect_archive, load_pins, require
+from eva_test_apache import PUBLIC_ORIGIN
+from eva_test_live import env_credentials, load_policy
 from eva_test_receiver import COMMAND, PROTOCOL, SAFE_ERRORS, SHA, prefix
 from test_api_readonly_access import PIN_SHA256, private_file
 
@@ -31,7 +33,7 @@ SAFE = SAFE_ERRORS | {
 }
 
 
-def project(raw, op, run, nonce, build):
+def project(raw, op, run, nonce, build, policy=None):
     result = strict_json(raw.decode('ascii'))
     require(type(result) is dict and canonical(result) == raw
             and result.get('protocol') == PROTOCOL, 'EVA_RECEIPT_REFUSED')
@@ -45,11 +47,17 @@ def project(raw, op, run, nonce, build):
     if op == 'CLEANUP':
         require(result.keys() == envelope and result['status'] == 'CLEANED', 'EVA_RECEIPT_REFUSED')
     else:
-        require(result.keys() == envelope | {'expires', 'build_sha', 'artifact_sha256', 'pdo', 'https', 'telegram', 'claude'}
-                and result['status'] == 'STAGED_LOCAL_ONLY' and result['pdo'] == 'BOUND_SYNTHETIC'
-                and result['https'] == 'NOT_CONFIGURED' and result['telegram'] == result['claude'] == 'NOT_RUN'
+        fields = envelope | {'expires', 'build_sha', 'artifact_sha256', 'pdo', 'https', 'telegram', 'claude'}
+        live = op == 'STAGE_LIVE' and policy is not None
+        shared = live and policy['ingress'] == 'existing-apache'
+        expected_tls = 'BOUND_EXISTING_TEST_TLS' if shared else 'BOUND_SECONDARY_LOCAL'
+        require(result.keys() == fields | ({'origin'} if live else set())
+                and (result['status'], result['https']) == (('STAGED_LIVE_READY', expected_tls) if live
+                                                           else ('STAGED_LOCAL_ONLY', 'NOT_CONFIGURED'))
+                and (not live or result['origin'] == (PUBLIC_ORIGIN if shared else policy['origin']))
+                and result['pdo'] == 'BOUND_SYNTHETIC' and result['telegram'] == result['claude'] == 'NOT_RUN'
                 and result['build_sha'] == build.sha and result['artifact_sha256'] == build.archive_sha256
-                and type(result['expires']) is int and time.time() < result['expires'] <= time.time() + 1200,
+                and type(result['expires']) is int and time.time() < result['expires'] <= time.time() + (720 if live else 1200),
                 'EVA_RECEIPT_REFUSED')
     return {key: value for key, value in result.items() if key not in ('protocol', 'nonce')}
 
@@ -66,10 +74,12 @@ def execute(env):
     sha, run_id = env.get('GITHUB_SHA', ''), env.get('GITHUB_RUN_ID', '')
     require(SHA.fullmatch(sha) and re.fullmatch('[1-9][0-9]{0,14}', run_id), 'EVA_GITHUB_CONTEXT_REFUSED')
     op = env.get('OPERATION')
-    require(op in ('STAGE', 'CLEANUP'), 'EVA_GITHUB_CONTEXT_REFUSED')
+    require(op in ('STAGE', 'STAGE_LIVE', 'CLEANUP'), 'EVA_GITHUB_CONTEXT_REFUSED')
     run = env.get('CLEANUP_RUN', '') if op == 'CLEANUP' else secrets.token_hex(6)
     require(valid_run(run) and (op == 'CLEANUP' or not env.get('CLEANUP_RUN')), 'EVA_GITHUB_CONTEXT_REFUSED')
     authorize(_GitHubGet(control_paths(run_id), token=env.get('GH_TOKEN')), env, run_id, sha)
+    policy = load_policy() if op == 'STAGE_LIVE' else None
+    credentials = env_credentials(env) if policy is not None else b''
     key, known = env.get('EVA_STAGE_SSH_KEY'), env.get('EVA_STAGE_KNOWN_HOSTS')
     require(type(key) is str and 0 < len(key) <= 16384 and '\0' not in key
             and type(known) is str and len(known) <= 16384 and sha256(known.encode()).hexdigest() == PIN_SHA256,
@@ -81,7 +91,7 @@ def execute(env):
         private_file(identity, key.replace('\r\n', '\n').rstrip('\n') + '\n')
         private_file(hosts, known)
         build, archive, size = None, None, 0
-        if op == 'STAGE':
+        if op != 'CLEANUP':
             token = env.get('STOREFRONT_ACTIONS_READ_TOKEN')
             require(type(token) is str and re.fullmatch('[!-~]{1,4096}', token), 'EVA_INSTALLATION_NOT_PROVISIONED')
             build = load_pins()
@@ -92,9 +102,9 @@ def execute(env):
             download(envelope, token, archive, size, time.monotonic() + 300)
             inspected, _ = inspect_archive(archive, build)
             verify(archive, inspected, time.monotonic() + 180, containerd_layer_sources=True)
-        raw = transfer(transport(identity, hosts), prefix(op, run, nonce, sha, build, size),
+        raw = transfer(transport(identity, hosts), prefix(op, run, nonce, sha, build, size, credentials),
                        archive, time.monotonic() + 720)
-    return {**project(raw, op, run, nonce, build), 'resource': RESOURCE, 'control_sha': sha,
+    return {**project(raw, op, run, nonce, build, policy), 'resource': RESOURCE, 'control_sha': sha,
             'workflow_run': 'https://github.com/' + REPO + '/actions/runs/' + run_id}
 
 

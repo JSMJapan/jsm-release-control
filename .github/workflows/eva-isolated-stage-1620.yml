@@ -14,12 +14,20 @@ on:
         required: true
         type: string
       operation:
-        description: Stage one local-only synthetic profile or clean up one exact run
+        description: Provision the dedicated receiver, stage an isolated profile, or clean up one exact run
         required: true
         type: choice
-        options: [STAGE, CLEANUP]
+        options: [BOOTSTRAP, STAGE, STAGE_LIVE, CLEANUP]
       cleanup_run:
         description: Twelve lowercase hexadecimal characters from the Eva receipt
+        required: false
+        type: string
+      receiver_public_key:
+        description: BOOTSTRAP only. Public OpenSSH Ed25519 key without comment
+        required: false
+        type: string
+      receiver_public_key_sha256:
+        description: BOOTSTRAP only. Reviewed SHA-256 of that public key with one trailing newline
         required: false
         type: string
 
@@ -39,12 +47,18 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Ensure the native disposable Apache fixture is available
+        run: |
+          if [ ! -x /usr/sbin/apache2 ]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends apache2
+          fi
       - run: python3 -B -m unittest discover -s tests -p 'test_*.py'
       - run: sh -n scripts/eva_test_forced_command.sh
   install:
     name: Owner-approved finite Eva TEST operation
     needs: offline
-    if: github.event_name == 'workflow_dispatch' && github.repository == 'JSMJapan/jsm-release-control' && github.event.repository.private == false && github.actor == 'JSMJapan' && github.triggering_actor == 'JSMJapan' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && inputs.approved_sha == github.sha
+    if: inputs.operation != 'BOOTSTRAP' && github.event_name == 'workflow_dispatch' && github.repository == 'JSMJapan/jsm-release-control' && github.event.repository.private == false && github.actor == 'JSMJapan' && github.triggering_actor == 'JSMJapan' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && inputs.approved_sha == github.sha
     runs-on: ubuntu-24.04
     timeout-minutes: 28
     environment: eva-isolated-stage-1620
@@ -57,6 +71,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Verify fixed source, TEST receiver and bounded receipt
+        if: inputs.operation != 'STAGE_LIVE'
         env:
           APPROVED_SHA: ${{ inputs.approved_sha }}
           OPERATION: ${{ inputs.operation }}
@@ -66,3 +81,45 @@ jobs:
           EVA_STAGE_SSH_KEY: ${{ secrets.EVA_STAGE_SSH_KEY }}
           EVA_STAGE_KNOWN_HOSTS: ${{ vars.EVA_STAGE_KNOWN_HOSTS }}
         run: python3 -I -B scripts/eva_test_install.py
+
+      - name: Verify the dedicated live profile and start its short approved lease
+        if: inputs.operation == 'STAGE_LIVE'
+        env:
+          APPROVED_SHA: ${{ inputs.approved_sha }}
+          OPERATION: ${{ inputs.operation }}
+          CLEANUP_RUN: ''
+          GH_TOKEN: ${{ github.token }}
+          STOREFRONT_ACTIONS_READ_TOKEN: ${{ secrets.STOREFRONT_ACTIONS_READ_TOKEN }}
+          EVA_STAGE_SSH_KEY: ${{ secrets.EVA_STAGE_SSH_KEY }}
+          EVA_STAGE_KNOWN_HOSTS: ${{ vars.EVA_STAGE_KNOWN_HOSTS }}
+          EVA_ISOLATED_GATE_USERNAME: ${{ secrets.EVA_ISOLATED_GATE_USERNAME }}
+          EVA_ISOLATED_GATE_PASSWORD: ${{ secrets.EVA_ISOLATED_GATE_PASSWORD }}
+          EVA_ISOLATED_BRIDGE_SECRET: ${{ secrets.EVA_ISOLATED_BRIDGE_SECRET }}
+          EVA_ISOLATED_ANTHROPIC_KEY: ${{ secrets.EVA_ISOLATED_ANTHROPIC_KEY }}
+        run: python3 -I -B scripts/eva_test_install.py
+
+  bootstrap:
+    name: Owner-approved Eva receiver bootstrap on jsm-sandbox
+    needs: offline
+    if: inputs.operation == 'BOOTSTRAP' && github.event_name == 'workflow_dispatch' && github.repository == 'JSMJapan/jsm-release-control' && github.event.repository.private == false && github.actor == 'JSMJapan' && github.triggering_actor == 'JSMJapan' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && inputs.approved_sha == github.sha
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    environment: test-api-readonly-access
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install only the approved Eva receiver and expiry unit files
+        env:
+          APPROVED_SHA: ${{ inputs.approved_sha }}
+          APPROVED_SCOPE: INSTALL_EVA_ONLY_RECEIVER
+          APPROVED_PUBLIC_KEY_SHA256: ${{ inputs.receiver_public_key_sha256 }}
+          EVA_STAGE_PUBLIC_KEY: ${{ inputs.receiver_public_key }}
+          GH_TOKEN: ${{ github.token }}
+          TEST_API_ADMIN_SSH_KEY: ${{ secrets.TEST_API_ADMIN_SSH_KEY }}
+          TEST_API_KNOWN_HOSTS: ${{ vars.TEST_API_KNOWN_HOSTS }}
+        run: python3 -I -B scripts/eva_test_bootstrap.py

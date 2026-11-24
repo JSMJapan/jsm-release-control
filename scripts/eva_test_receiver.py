@@ -18,7 +18,8 @@ from article_test_receiver import end_input, read_exact
 from article_test_state import canonical, valid_run
 from test_installer_update_receiver import _host_matches
 from eva_test_archive import ARCHIVE_LIMIT, EvaRefused, load_pins, require
-from eva_test_host import BASE, State, TTL, arm_expiry, clean, host_lock, read_owned, root_directory, stage
+from eva_test_host import BASE, State, TTL, arm_expiry, clean, host_live_preflight, host_lock, read_owned, root_directory, stage
+from eva_test_live import load_policy, read_credentials
 
 MAGIC = b'JSM_EVA_TEST_1620_V1\n'
 PROTOCOL = 'jsm-eva-test-1620-v1'
@@ -31,15 +32,20 @@ SAFE_ERRORS = {
     'EVA_FRAME_REFUSED', 'EVA_PACKAGE_REFUSED', 'EVA_NAME_COLLISION', 'EVA_IMAGE_REFUSED',
     'EVA_ISOLATION_REFUSED', 'EVA_PDO_REFUSED', 'EVA_DB_GRANTS_REFUSED', 'EVA_DB_REFUSED',
     'EVA_READINESS_REFUSED', 'EVA_CLEANUP_UNCONFIRMED', 'EVA_EXPIRY_NOT_PROVISIONED',
+    'EVA_LIVE_PROFILE_NOT_PROVISIONED', 'EVA_LIVE_INPUTS_NOT_CONFIGURED', 'EVA_LIVE_WINDOW_REFUSED',
+    'EVA_LIVE_ADDRESS_REFUSED', 'EVA_LIVE_PROVIDER_ISOLATION_REFUSED', 'EVA_LIVE_SERVICE_REFUSED',
+    'EVA_TEST_VHOST_REFUSED', 'EVA_TEST_DEPLOY_LOCK_UNPROVEN', 'EVA_TEST_APACHE_LOG_SCOPE_REFUSED',
 }
 
 
 def validate_request(value, approved):
-    require(type(value) is dict and value.keys() == {'protocol', 'op', 'run', 'nonce', 'sha', 'artifact', 'size'}
-            and value['protocol'] == PROTOCOL and value['op'] in ('STAGE', 'CLEANUP')
+    require(type(value) is dict and value.keys() == {'protocol', 'op', 'run', 'nonce', 'sha', 'artifact', 'size', 'credentials_size'}
+            and value['protocol'] == PROTOCOL and value['op'] in ('STAGE', 'STAGE_LIVE', 'CLEANUP')
             and valid_run(value['run']) and type(value['nonce']) is str and NONCE.fullmatch(value['nonce'])
             and type(value['sha']) is str and SHA.fullmatch(value['sha']) and value['sha'] == approved
-            and type(value['size']) is int, 'EVA_FRAME_REFUSED')
+            and type(value['size']) is int and type(value['credentials_size']) is int
+            and (0 < value['credentials_size'] <= 2048 if value['op'] == 'STAGE_LIVE' else value['credentials_size'] == 0),
+            'EVA_FRAME_REFUSED')
     if value['op'] == 'CLEANUP':
         require(value['artifact'] is None and value['size'] == 0, 'EVA_FRAME_REFUSED')
     else:
@@ -48,11 +54,11 @@ def validate_request(value, approved):
     return value
 
 
-def prefix(op, run, nonce, sha, build, size):
+def prefix(op, run, nonce, sha, build, size, credentials=b''):
     request = {'protocol': PROTOCOL, 'op': op, 'run': run, 'nonce': nonce, 'sha': sha,
-               'artifact': asdict(build) if build is not None else None, 'size': size}
+               'artifact': asdict(build) if build is not None else None, 'size': size, 'credentials_size': len(credentials)}
     data = canonical(validate_request(request, sha))
-    return MAGIC + len(data).to_bytes(4, 'big') + data
+    return MAGIC + len(data).to_bytes(4, 'big') + data + credentials
 
 
 def frame(fd, deadline, approved):
@@ -101,15 +107,19 @@ def execute(request, fd, deadline):
         expire(run, False)
         return {'status': 'CLEANED', 'run': run}
     build = load_pins()
+    policy = load_policy() if request['op'] == 'STAGE_LIVE' else None
+    if policy is not None:
+        host_live_preflight(policy, deadline)
     with State(run, create=True) as store:
         state = {'run': run, 'expires': int(time.time()) + TTL, 'aliases': [], 'tags': [],
-                 'import_started': False, 'import_complete': False, 'prepared': []}
+                 'import_started': False, 'import_complete': False, 'prepared': [], 'units': []}
         try:
             store.save(state)
             # Expiry is armed before the first byte of the private archive.
             arm_expiry(store, state['expires'], deadline)
+            credentials = read_credentials(read_exact(fd, request['credentials_size'], min(deadline, time.monotonic() + 10))) if policy is not None else None
             receive(fd, store.path, request, min(deadline, time.monotonic() + 300))
-            return stage(store, state, build, deadline)
+            return stage(store, state, build, deadline, policy, credentials)
         except BaseException:
             try:
                 clean(store, store.read(), time.monotonic() + 90)

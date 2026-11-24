@@ -8,7 +8,6 @@ WORKFLOW = '.github/workflows/eva-isolated-stage-1620.yml'
 PACKAGE_WORKFLOW = '.github/workflows/eva-isolated-test-package-1620.yml'
 ENVIRONMENT = 'eva-isolated-stage-1620'
 CONTROL = '/repos/' + REPO
-ENV = CONTROL + '/environments/' + ENVIRONMENT
 REPO_ID = 1427965640
 ARTIFACT_STEPS = (
     'Check out the exact Eva package source',
@@ -30,28 +29,29 @@ def repo_matches(row, name, identity, private):
             and row.get('private') is private)
 
 
-def control_paths(run_id):
+def control_paths(run_id, *, environment_name=ENVIRONMENT):
+    env = CONTROL + '/environments/' + environment_name
     run = CONTROL + '/actions/runs/' + run_id
     return (
-        CONTROL, ENV, ENV + '/deployment-branch-policies', CONTROL + '/branches/main',
+        CONTROL, env, env + '/deployment-branch-policies', CONTROL + '/branches/main',
         CONTROL + '/actions/workflows/' + WORKFLOW.rsplit('/', 1)[1], run, run + '/approvals',
     )
 
 
-def authorize(api, env, run_id, sha):
+def authorize(api, env, run_id, sha, *, environment_name=ENVIRONMENT, job='install'):
     fixed = {
         'GITHUB_REPOSITORY': REPO, 'GITHUB_EVENT_NAME': 'workflow_dispatch', 'GITHUB_ACTOR': 'JSMJapan',
         'GITHUB_TRIGGERING_ACTOR': 'JSMJapan', 'GITHUB_REF': 'refs/heads/main', 'GITHUB_RUN_ATTEMPT': '1',
         'GITHUB_SERVER_URL': 'https://github.com', 'GITHUB_API_URL': 'https://api.github.com',
-        'GITHUB_JOB': 'install', 'GITHUB_WORKFLOW_REF': REPO + '/' + WORKFLOW + '@refs/heads/main',
+        'GITHUB_JOB': job, 'GITHUB_WORKFLOW_REF': REPO + '/' + WORKFLOW + '@refs/heads/main',
         'GITHUB_WORKFLOW_SHA': sha, 'GITHUB_SHA': sha, 'APPROVED_SHA': sha, 'GITHUB_RUN_ID': run_id,
     }
     require(all(env.get(k) == value for k, value in fixed.items()), 'EVA_GITHUB_CONTEXT_REFUSED')
-    repo, environment, policies, branch, work, run, approvals = [api.get_json(path) for path in control_paths(run_id)]
+    repo, environment, policies, branch, work, run, approvals = [api.get_json(path) for path in control_paths(run_id, environment_name=environment_name)]
     policy_ready(repo, environment, policies)
     reviewers = [item for item in environment['protection_rules'] if item['type'] == 'required_reviewers']
     require(repo_matches(repo, REPO, REPO_ID, False) and owner(repo.get('owner'))
-            and type(environment.get('id')) is int and environment.get('name') == ENVIRONMENT
+            and type(environment.get('id')) is int and environment.get('name') == environment_name
             and owner(reviewers[0]['reviewers'][0]['reviewer']), 'EVA_GITHUB_APPROVAL_REFUSED')
     require(branch.get('name') == 'main' and branch.get('protected') is True and branch.get('commit', {}).get('sha') == sha
             and work.get('path') == WORKFLOW and work.get('state') == 'active' and type(work.get('id')) is int
@@ -65,7 +65,7 @@ def authorize(api, env, run_id, sha):
     targets = review.get('environments')
     require(review.get('state') == 'approved' and owner(review.get('user'))
             and type(targets) is list and len(targets) == 1
-            and targets[0].get('id') == environment['id'] and targets[0].get('name') == ENVIRONMENT,
+            and targets[0].get('id') == environment['id'] and targets[0].get('name') == environment_name,
             'EVA_GITHUB_APPROVAL_REFUSED')
 
 

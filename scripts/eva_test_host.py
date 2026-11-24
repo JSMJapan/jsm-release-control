@@ -2,11 +2,15 @@
 
 from contextlib import contextmanager
 import fcntl
+from hashlib import sha256
+import http.client
 import os
 from pathlib import Path
 import re
 import secrets
 import shutil
+import socket
+import ssl
 import stat
 import time
 
@@ -16,13 +20,17 @@ from article_test_host import LIMITS, MEMORY, command, namespace, resource_admis
 from article_test_images import image_stream, verify
 from article_test_state import canonical, valid_run
 from eva_test_archive import IMAGE, inspect_archive, require
+from eva_test_apache import PUBLIC_GATE, PUBLIC_HOST, PUBLIC_ORIGIN, patched, publisher_lock, read_active, replace_active, verify_logs
+from eva_test_live import LEASE_SECONDS, TLS_DIRECTORY, verify_certificate
 
 BASE = Path('/var/lib/jsm-eva-test-1620')
 LABEL = 'com.jsmjapan.eva-test.run'
 TTL = 1200
 PHP_PORT = 19881
 RUNNER = '/usr/local/libexec/jsm-eva-test-1620/eva_test_receiver.py'
+LIVE_RUNNER = '/usr/local/libexec/jsm-eva-test-1620/eva_test_live.py'
 EXPIRY_TIMER = 'jsm-eva-test-1620-expiry.timer'
+EXPIRY_UNITS = {'jsm-eva-test-1620-expiry.service': 'f19d123464361a00f99f1121302ee6894b18b425e043735c3cb99db901d77edd', 'jsm-eva-test-1620-expiry.timer': '17a9c4ef89a78be85d76f894c535dd3ffe758da3c17da017601d677b091aea2b'}
 FORMAT = '{' + ','.join(
     '"' + key + '":{{json ' + (('(index .Config.Labels "' + LABEL + '")') if key == 'run' else value) + '}}'
     for key, value in FIELDS.items()) + '}'
@@ -119,10 +127,12 @@ class State:
     def read(self):
         raw = read_owned(self.path / 'state.json', 8192)
         state = strict_json(raw.decode('ascii'))
-        require(type(state) is dict and state.keys() == {'run', 'expires', 'import_started', 'import_complete', 'aliases', 'tags', 'prepared'}
+        require(type(state) is dict and state.keys() == {'run', 'expires', 'import_started', 'import_complete', 'aliases', 'tags', 'prepared', 'units'}
                 and state.get('run') == self.run and type(state['expires']) is int and type(state['import_started']) is bool
                 and type(state['import_complete']) is bool and (not state['import_complete'] or state['import_started'])
-                and (not state['prepared'] or state['import_complete']) and type(state['prepared']) is list and state['prepared'] in ([], ['db'], ['db', 'app']),
+                and (not state['prepared'] or state['import_complete']) and type(state['prepared']) is list and state['prepared'] in ([], ['db'], ['db', 'app'])
+                and state['units'] in ([], ['relay'], ['relay', 'https'])
+                and (not state['units'] or state['prepared'] == ['db', 'app']),
                 'EVA_STATE_REFUSED')
         tags, aliases = state['tags'], state['aliases']
         require((tags == aliases == [] and not state['import_started'] and not state['prepared']) or (
@@ -149,6 +159,10 @@ class State:
 
 
 def arm_expiry(store, expires, deadline):
+    for unit, digest in EXPIRY_UNITS.items():
+        value = read_owned(Path('/etc/systemd/system') / unit, 8192, (0o444,))
+        require(sha256(value).hexdigest() == digest, 'EVA_EXPIRY_NOT_PROVISIONED')
+    command(('/usr/bin/systemctl', 'enable', '--now', EXPIRY_TIMER), deadline)
     for condition, expected in (('is-enabled', b'enabled'), ('is-active', b'active')):
         proof = command(('/usr/bin/systemctl', condition, EXPIRY_TIMER), deadline)
         require(proof.strip() == expected, 'EVA_EXPIRY_NOT_PROVISIONED')
@@ -180,6 +194,16 @@ def observe(docker, identity, store, aliases):
 
 def clean(store, state, deadline):
     require(os.geteuid() == 0, 'EVA_HOST_REFUSED')
+    if state.get('units'):
+        # Revoke live inputs before trying to stop services or inspect Docker.
+        for path in (store.path / 'anthropic.key', store.path / 'input' / 'gate-user',
+                     store.path / 'input' / 'gate-password', store.path / 'input' / 'bridge-secret'):
+            if os.path.lexists(path):
+                require(owned_file(path, (0o600, 0o444)), 'EVA_STATE_REFUSED')
+                path.unlink()
+    restore_apache(store, deadline)
+    for role in reversed(state.get('units', [])):
+        stop_live(store, role, deadline)
     if state['import_started']:
         if not state['import_complete']:
             # The archive is only needed before import. Keep the inert provenance record
@@ -207,11 +231,11 @@ def clean(store, state, deadline):
     shutil.rmtree(store.path)
 
 
-def mount(path, target):
-    return 'type=bind,source=' + str(path) + ',target=' + target + ',readonly'
+def mount(path, target, readonly=True):
+    return 'type=bind,source=' + str(path) + ',target=' + target + (',readonly' if readonly else '')
 
 
-def role_args(store, role, tag, db=None):
+def role_args(store, role, tag, db=None, *, live=False):
     common = ('--name', name(role, store.run), '--label', LABEL + '=' + store.run,
               '--pull', 'never', '--ipc', 'private', *LIMITS)
     if role == 'db':
@@ -221,26 +245,34 @@ def role_args(store, role, tag, db=None):
                 '--mount', mount(store.path / 'root.cnf', '/run/root.cnf'),
                 '--env', 'MYSQL_ROOT_PASSWORD_FILE=/run/eva-root', tag,
                 '--bind-address=127.0.0.1', '--skip-name-resolve', '--mysqlx=0')
-    return (*common, '--network', 'container:' + db, '--read-only', '--cap-drop', 'ALL',
-            '--security-opt', 'no-new-privileges',
-            '--tmpfs', '/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777',
-            '--tmpfs', '/run/eva-ingress:rw,noexec,nosuid,nodev,uid=10001,gid=10001,mode=0700',
-            '--tmpfs', '/run/eva-provider:rw,noexec,nosuid,nodev,uid=10001,gid=10001,mode=0700',
-            '--mount', mount(store.path / 'input', '/run/eva-input'), tag)
+    common += ('--network', 'container:' + db, '--read-only', '--cap-drop', 'ALL',
+               '--security-opt', 'no-new-privileges', '--tmpfs', '/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777')
+    if live:
+        sockets = ('--mount', mount(store.path / 'ingress', '/run/eva-ingress', readonly=False),
+                   '--mount', mount(store.path / 'provider', '/run/eva-provider'))
+    else:
+        sockets = ('--tmpfs', '/run/eva-ingress:rw,noexec,nosuid,nodev,uid=10001,gid=10001,mode=0700',
+                   '--tmpfs', '/run/eva-provider:rw,noexec,nosuid,nodev,uid=10001,gid=10001,mode=0700')
+    return (*common, *sockets, '--mount', mount(store.path / 'input', '/run/eva-input'), tag)
 
 
-def prove_boundary(docker, identity, store, role, aliases, db=None):
+def prove_boundary(docker, identity, store, role, aliases, db=None, *, live=False):
     row = observe(docker, identity, store, aliases)
     is_app = role == 'app'
     mounts = row['mounts']
-    expected = {'/run/eva-input': store.path / 'input'} if is_app else {
-        '/run/eva-root': store.path / 'root.password', '/run/root.cnf': store.path / 'root.cnf',
+    expected = {'/run/eva-input': (store.path / 'input', False)} if is_app else {
+        '/run/eva-root': (store.path / 'root.password', False), '/run/root.cnf': (store.path / 'root.cnf', False),
     }
+    if is_app and live:
+        expected.update({'/run/eva-ingress': (store.path / 'ingress', True),
+                         '/run/eva-provider': (store.path / 'provider', False)})
     tmpfs = {
         '/tmp': 'rw,noexec,nosuid,nodev,size=64m,mode=1777',
         '/run/eva-ingress': 'rw,noexec,nosuid,nodev,uid=10001,gid=10001,mode=0700',
         '/run/eva-provider': 'rw,noexec,nosuid,nodev,uid=10001,gid=10001,mode=0700',
     } if is_app else {'/var/lib/mysql': 'rw,noexec,nosuid,nodev,size=512m'}
+    if is_app and live:
+        del tmpfs['/run/eva-ingress'], tmpfs['/run/eva-provider']
     require(row['network'] == ('container:' + db if is_app else 'none')
             and row['memory'] == row['swap'] == MEMORY and row['cpu'] == 500000000 and row['pids'] == 128
             and row['privileged'] is False and row['readonly'] is is_app and row['ports'] in (None, {})
@@ -253,8 +285,8 @@ def prove_boundary(docker, identity, store, role, aliases, db=None):
     seen = set()
     for mount_row in mounts:
         dest = mount_row.get('Destination')
-        require(dest not in seen and ((dest in expected and mount_row.get('Source') == str(expected[dest])
-                and mount_row.get('Type') == 'bind' and mount_row.get('RW') is False
+        require(dest not in seen and ((dest in expected and mount_row.get('Source') == str(expected[dest][0])
+                and mount_row.get('Type') == 'bind' and mount_row.get('RW') is expected[dest][1]
                 and mount_row.get('Propagation') == 'rprivate')
                 or (dest in tmpfs and mount_row.get('Type') == 'tmpfs' and mount_row.get('RW') is True)),
                 'EVA_ISOLATION_REFUSED')
@@ -269,16 +301,16 @@ def assert_loopback(docker, identity):
             'EVA_ISOLATION_REFUSED')
 
 
-def start_role(docker, store, state, role, exact_image, db=None):
+def start_role(docker, store, state, role, exact_image, db=None, *, live=False):
     index = 0 if role == 'app' else 1
     require(lookup(docker, role, store.run) is None, 'EVA_NAME_COLLISION')
     state['prepared'].append(role)
     store.save(state)
     require(exact_image in state['aliases'][index], 'EVA_IMAGE_REFUSED')
-    identity = docker.create(role_args(store, role, exact_image, db))
-    prove_boundary(docker, identity, store, role, state['aliases'][index], db)
+    identity = docker.create(role_args(store, role, exact_image, db, live=live))
+    prove_boundary(docker, identity, store, role, state['aliases'][index], db, live=live)
     docker.start(identity)
-    running = prove_boundary(docker, identity, store, role, state['aliases'][index], db)
+    running = prove_boundary(docker, identity, store, role, state['aliases'][index], db, live=live)
     assert_loopback(docker, identity)
     net = namespace(running['pid'])
     require(net != namespace(os.getpid()), 'EVA_ISOLATION_REFUSED')
@@ -316,7 +348,7 @@ def initialize(docker, db, run, password, metadata):
     return server
 
 
-def stage(store, state, build, deadline):
+def stage(store, state, build, deadline, policy=None, credentials=None):
     artifact = store.path / 'artifact.zip'
     inspected, metadata = inspect_archive(artifact, build)
     proof = verify(artifact, inspected, deadline, containerd_layer_sources=True)
@@ -353,16 +385,216 @@ def stage(store, state, build, deadline):
     inputs.chmod(0o755)
     profile = {'mode': 'ci', 'run': store.run, 'origin': 'https://eva-teacher-test.invalid',
                'until': state['expires'], 'server_uuid': server}
+    gate = {'bridge-secret': secrets.token_hex(32), 'gate-user': 'eva-local-only', 'gate-password': secrets.token_hex(24)}
+    if policy is not None:
+        now = int(time.time())
+        until = now + LEASE_SECONDS
+        require(until <= state['expires'] and (now + 32400) // 86400 == (until + 32400) // 86400,
+                'EVA_LIVE_WINDOW_REFUSED')
+        profile.update(mode='live', origin=policy['origin'], until=until)
+        gate = {key: credentials[key] for key in gate}
+        provision_live_paths(store, profile, policy, credentials)
     write_new(inputs / 'profile.json', canonical(profile), mode=0o444)
-    for key, value in {'db-password': password, 'bridge-secret': secrets.token_hex(32),
-                       'gate-user': 'eva-local-only', 'gate-password': secrets.token_hex(24),
-                       'session-key': secrets.token_hex(32)}.items():
+    for key, value in {'db-password': password, 'session-key': secrets.token_hex(32), **gate}.items():
         write_new(inputs / key, value.encode('ascii'), mode=0o444)
-    app, app_net = start_role(docker, store, state, 'app', images[0], db)
+    app, app_net = start_role(docker, store, state, 'app', images[0], db, live=policy is not None)
     require(net == app_net, 'EVA_ISOLATION_REFUSED')
     arguments = ('exec', app, 'python3', '-I', '-B', '-c', HEALTH_PROGRAM)
     ready = wait_ready(lambda: docker.run(arguments, seconds=4, limit=256), min(docker.deadline, time.monotonic() + 20))
     require(strict_json(ready.decode('ascii')) == {'status': 'ready', 'pdo': 'bound', 'tables': 2}, 'EVA_PDO_REFUSED')
-    return {'status': 'STAGED_LOCAL_ONLY', 'run': store.run, 'expires': state['expires'],
-            'build_sha': build.sha, 'artifact_sha256': build.archive_sha256,
-            'pdo': 'BOUND_SYNTHETIC', 'https': 'NOT_CONFIGURED', 'telegram': 'NOT_RUN', 'claude': 'NOT_RUN'}
+    receipt = {'status': 'STAGED_LOCAL_ONLY', 'run': store.run, 'expires': state['expires'],
+               'build_sha': build.sha, 'artifact_sha256': build.archive_sha256,
+               'pdo': 'BOUND_SYNTHETIC', 'https': 'NOT_CONFIGURED', 'telegram': 'NOT_RUN', 'claude': 'NOT_RUN'}
+    if policy is not None:
+        live_services(docker, app, store, state, policy, profile['until'], deadline)
+        shared = policy['ingress'] == 'existing-apache'
+        receipt.update(status='STAGED_LIVE_READY', expires=profile['until'],
+                       https='BOUND_EXISTING_TEST_TLS' if shared else 'BOUND_SECONDARY_LOCAL',
+                       origin=PUBLIC_ORIGIN if shared else policy['origin'])
+    return receipt
+
+
+def provision_live_paths(store, profile, policy, credentials):
+    folder = store.path
+    for name in ('ingress', 'provider'):
+        path = folder / name
+        path.mkdir(mode=0o700)
+        os.chown(path, 10001, 10001)
+    for name in ('relay-input', 'relay-code'):
+        path = folder / name
+        path.mkdir(mode=0o755)
+        path.chmod(0o755)
+    write_new(folder / 'relay-input/profile.json', canonical(profile), mode=0o444)
+    write_new(folder / 'anthropic.key', credentials['anthropic'].encode('ascii'))
+
+
+def host_live_preflight(policy, deadline):
+    require(Path('/sys/fs/cgroup/cgroup.controllers').is_file(), 'EVA_LIVE_PROVIDER_ISOLATION_REFUSED')
+    if policy['ingress'] == 'existing-apache':
+        original, _ = read_active()
+        patched(original, policy['vhost_sha256'])
+        vhosts = command(('/usr/sbin/apache2ctl', '-S'), deadline, limit=32768)
+        require(PUBLIC_HOST.encode('ascii') in vhosts and b'jsm-sandbox-443.conf' in vhosts,
+                'EVA_TEST_VHOST_REFUSED')
+        return
+    cert, key = TLS_DIRECTORY / 'tls.crt', TLS_DIRECTORY / 'tls.key'
+    require(root_directory(TLS_DIRECTORY.lstat()) and owned_file(cert, (0o400, 0o600, 0o444))
+            and owned_file(key, (0o400, 0o600)), 'EVA_LIVE_PROFILE_NOT_PROVISIONED')
+    verify_certificate(cert, policy)
+    raw = command(('/usr/sbin/ip', '-j', '-4', 'address', 'show'), deadline, limit=32768)
+    interfaces = strict_json(raw.decode('ascii'))
+    candidates = [address for entry in interfaces for address in entry.get('addr_info', [])
+                  if address.get('local') == policy['listen_ipv4']]
+    require(len(candidates) == 1 and candidates[0].get('secondary') is True
+            and candidates[0].get('scope') == 'global', 'EVA_LIVE_ADDRESS_REFUSED')
+
+def service_properties():
+    return ('--property=User=10001', '--property=Group=10001', '--property=UMask=0077',
+            '--property=NoNewPrivileges=yes', '--property=ProtectSystem=strict', '--property=ProtectHome=yes',
+            '--property=PrivateTmp=yes', '--property=ProtectKernelTunables=yes',
+            '--property=RestrictAddressFamilies=AF_INET AF_UNIX', '--property=Restart=no',
+            '--property=StandardOutput=null', '--property=StandardError=null')
+
+
+def service_state(unit, property_name, deadline):
+    return command(('/usr/bin/systemctl', 'show', unit, '--property=' + property_name, '--value'), deadline).strip()
+
+
+def stop_live(store, role, deadline):
+    unit = name(role, store.run) + '.service'
+    load = service_state(unit, 'LoadState', deadline)
+    if load == b'not-found':
+        return
+    fragment = service_state(unit, 'FragmentPath', deadline)
+    description = service_state(unit, 'Description', deadline)
+    command_line = service_state(unit, 'ExecStart', deadline)
+    require(fragment == ('/run/systemd/transient/' + unit).encode('ascii')
+            and description == live_description(store, role).encode('ascii')
+            and (LIVE_RUNNER + ' ' + role + ' ' + store.run).encode('ascii') in command_line,
+            'EVA_CLEANUP_UNCONFIRMED')
+    command(('/usr/bin/systemctl', 'stop', unit), deadline)
+    require(service_state(unit, 'ActiveState', deadline) in (b'inactive', b'failed'), 'EVA_CLEANUP_UNCONFIRMED')
+
+
+def live_description(store, role):
+    return 'JSM isolated Eva 1620 ' + role + ' ' + store.run
+
+
+def open_service(store, state, role, until, properties, deadline):
+    unit = name(role, store.run)
+    require(service_state(unit + '.service', 'LoadState', deadline) == b'not-found', 'EVA_NAME_COLLISION')
+    seconds = until - int(time.time())
+    require(0 < seconds <= LEASE_SECONDS, 'EVA_LIVE_WINDOW_REFUSED')
+    state['units'].append(role)
+    store.save(state)
+    command(('/usr/bin/systemd-run', '--quiet', '--collect', '--unit=' + unit,
+             '--description=' + live_description(store, role), '--property=RuntimeMaxSec=' + str(seconds),
+             *service_properties(), *properties,
+             '/usr/bin/python3', '-I', '-B', '-S', LIVE_RUNNER, role, store.run, str(until)), deadline)
+    require(service_state(unit + '.service', 'ActiveState', deadline) == b'active', 'EVA_LIVE_SERVICE_REFUSED')
+    return unit + '.service'
+
+
+def wait_socket(path, deadline):
+    while time.monotonic() < deadline:
+        try:
+            observed = path.lstat()
+        except FileNotFoundError:
+            time.sleep(0.2)
+            continue
+        require(stat.S_ISSOCK(observed.st_mode) and observed.st_uid == 10001, 'EVA_LIVE_SERVICE_REFUSED')
+        return
+    require(False, 'EVA_LIVE_SERVICE_REFUSED')
+
+
+def live_services(docker, app, store, state, policy, until, deadline):
+    folder = store.path
+    host_live_preflight(policy, deadline)
+    for filename in ('provider.py', 'gateway.py'):
+        code = docker.run(('exec', app, 'cat', '/app/' + filename), limit=16384)
+        compile(code, '<pinned private image>', 'exec')
+        write_new(folder / 'relay-code' / filename, code, mode=0o444)
+    wait_socket(folder / 'ingress/http.sock', min(deadline, time.monotonic() + 12))
+    relay = open_service(store, state, 'relay', until, (
+        '--property=ReadWritePaths=-/run/eva-provider',
+        '--property=BindPaths=' + str(folder / 'provider') + ':/run/eva-provider',
+        '--property=BindReadOnlyPaths=' + str(folder / 'relay-input') + ':/run/eva-input '
+        + str(folder / 'relay-code') + ':/run/eva-relay-code',
+        '--property=LoadCredential=anthropic:' + str(folder / 'anthropic.key'),
+        '--property=IPAddressDeny=any', '--property=IPAddressAllow=' + policy['provider_ipv4'] + '/32',
+    ), deadline)
+    require(policy['provider_ipv4'].encode('ascii') in service_state(relay, 'IPAddressAllow', deadline)
+            and service_state(relay, 'IPAddressDeny', deadline), 'EVA_LIVE_PROVIDER_ISOLATION_REFUSED')
+    wait_socket(folder / 'provider/anthropic.sock', min(deadline, time.monotonic() + 12))
+    (folder / 'anthropic.key').unlink()
+    shared = policy['ingress'] == 'existing-apache'
+    properties = ('--property=BindReadOnlyPaths=' + str(folder / 'ingress') + ':/run/eva-ingress',)
+    if not shared:
+        properties += ('--property=AmbientCapabilities=CAP_NET_BIND_SERVICE',
+                       '--property=CapabilityBoundingSet=CAP_NET_BIND_SERVICE',
+                       '--property=LoadCredential=certificate:' + str(TLS_DIRECTORY / 'tls.crt'),
+                       '--property=LoadCredential=key:' + str(TLS_DIRECTORY / 'tls.key'))
+    service = open_service(store, state, 'https', until, properties, deadline)
+    if shared:
+        install_apache(store, policy, deadline)
+    host, address = (PUBLIC_HOST, '127.0.0.1') if shared else (policy['origin'][8:], policy['listen_ipv4'])
+    probe_tls(host, address, policy, store.run, until, shared, deadline)
+    require(service_state(service, 'ActiveState', deadline) == b'active', 'EVA_LIVE_SERVICE_REFUSED')
+
+
+def apache_reload(deadline):
+    command(('/usr/sbin/apache2ctl', 'configtest'), deadline)
+    command(('/usr/bin/systemctl', 'reload', 'apache2.service'), deadline)
+
+
+def install_apache(store, policy, deadline):
+    with publisher_lock():
+        config = command(('/usr/sbin/apache2ctl', '-t', '-D', 'DUMP_INCLUDES'), deadline, limit=32768)
+        verify_logs(config)
+        original, info = read_active()
+        modified = patched(original, policy['vhost_sha256'])
+        write_new(store.path / 'apache-vhost.original', original)
+        replace_active(original, modified, info, store.run)
+        apache_reload(deadline)
+
+
+def restore_apache(store, deadline):
+    backup = store.path / 'apache-vhost.original'
+    if not os.path.lexists(backup):
+        return
+    with publisher_lock():
+        original = read_owned(backup, 65536)
+        modified = patched(original, sha256(original).hexdigest())
+        current, info = read_active()
+        if current == modified:
+            replace_active(current, original, info, store.run)
+            apache_reload(deadline)
+        else:
+            require(current == original, 'EVA_CLEANUP_UNCONFIRMED')
+            # A prior rollback can have restored disk contents before the reload completed.
+            apache_reload(deadline)
+        backup.unlink()
+
+
+def probe_tls(host, address, policy, run, expires, shared, deadline):
+    context = ssl.create_default_context()
+    until = min(deadline, time.monotonic() + 15)
+    while time.monotonic() < until:
+        try:
+            with socket.create_connection((address, 443), timeout=2) as channel:
+                with context.wrap_socket(channel, server_hostname=host) as tls:
+                    require(sha256(tls.getpeercert(binary_form=True)).hexdigest() == policy['certificate_sha256'],
+                            'EVA_LIVE_SERVICE_REFUSED')
+                    path = PUBLIC_GATE if shared else '/__gate/?next=%2Fru%2F'
+                    tls.sendall(f'GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n'.encode())
+                    response = http.client.HTTPResponse(tls)
+                    try:
+                        response.begin()
+                        require(response.status == 401 and response.getheader('X-Eva-Test-Run') == run
+                                and response.getheader('X-Eva-Test-Expires') == str(expires), 'EVA_TEST_VHOST_REFUSED')
+                    finally:
+                        response.close()
+                    return
+        except ConnectionRefusedError:
+            time.sleep(0.2)
+    require(False, 'EVA_LIVE_SERVICE_REFUSED')

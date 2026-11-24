@@ -64,7 +64,7 @@ def inspect_archive(path, build):
     with os.fdopen(fd, 'rb') as file:
         info = os.fstat(file.fileno())
         require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1
-                and file_stamp(info) == file_stamp(path.stat(follow_symlinks=False)))
+                and file_stamp(info) == file_stamp(path.lstat()))
         digest, size = bounded_hash(file, ARCHIVE_LIMIT)
         require(digest == build.archive_sha256 and size == info.st_size)
         file.seek(0)
@@ -97,7 +97,7 @@ def inspect_archive(path, build):
             require(len(set(images)) == 2 and all(IMAGE.fullmatch(value.removesuffix('\n')) and value.endswith('\n') for value in images))
             metadata = {name: archive.read(name) for name in ('schema.sql', 'seed.sql')}
             lengths = {item.filename: item.file_size for item in items}
-        require(file_stamp(info) == file_stamp(os.fstat(file.fileno())) == file_stamp(path.stat(follow_symlinks=False)))
+        require(file_stamp(info) == file_stamp(os.fstat(file.fileno())) == file_stamp(path.lstat()))
     inspected = Inspected(build, lengths, BRIDGE, BRIDGE_TREE, *[value[:-1] for value in images],
                           size, lengths['images.tar.gz'], fixtures['schema_sha256'], fixtures['seed_sha256'])
     return inspected, metadata
