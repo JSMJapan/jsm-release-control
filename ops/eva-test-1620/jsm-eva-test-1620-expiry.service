@@ -1,0 +1,9 @@
+[Unit]
+Description=Clean expired isolated Eva TEST runs
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+TimeoutStartSec=120
+ExecStart=/usr/bin/python3 -I -B -S /usr/local/libexec/jsm-eva-test-1620/eva_test_receiver.py expire-all

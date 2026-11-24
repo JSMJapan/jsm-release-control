@@ -1,0 +1,68 @@
+name: 'TEST #1620 — isolated Eva STAGE/CLEANUP'
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/eva-isolated-stage-1620.yml'
+      - 'ops/eva-test-1620/**'
+      - 'scripts/eva_test_*'
+      - 'scripts/article_test_images.py'
+      - 'tests/test_eva_test_*'
+  workflow_dispatch:
+    inputs:
+      approved_sha:
+        description: Exact reviewed control main commit
+        required: true
+        type: string
+      operation:
+        description: Stage one local-only synthetic profile or clean up one exact run
+        required: true
+        type: choice
+        options: [STAGE, CLEANUP]
+      cleanup_run:
+        description: Twelve lowercase hexadecimal characters from the Eva receipt
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.event_name == 'workflow_dispatch' && 'test-db-metadata-readonly' || format('eva-stage-1620-pr-{0}', github.event.pull_request.number) }}
+  cancel-in-progress: false
+
+jobs:
+  offline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - run: python3 -B -m unittest discover -s tests -p 'test_*.py'
+      - run: sh -n scripts/eva_test_forced_command.sh
+  install:
+    name: Owner-approved finite Eva TEST operation
+    needs: offline
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'JSMJapan/jsm-release-control' && github.event.repository.private == false && github.actor == 'JSMJapan' && github.triggering_actor == 'JSMJapan' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && inputs.approved_sha == github.sha
+    runs-on: ubuntu-24.04
+    timeout-minutes: 28
+    environment: eva-isolated-stage-1620
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify fixed source, TEST receiver and bounded receipt
+        env:
+          APPROVED_SHA: ${{ inputs.approved_sha }}
+          OPERATION: ${{ inputs.operation }}
+          CLEANUP_RUN: ${{ inputs.cleanup_run }}
+          GH_TOKEN: ${{ github.token }}
+          STOREFRONT_ACTIONS_READ_TOKEN: ${{ secrets.STOREFRONT_ACTIONS_READ_TOKEN }}
+          EVA_STAGE_SSH_KEY: ${{ secrets.EVA_STAGE_SSH_KEY }}
+          EVA_STAGE_KNOWN_HOSTS: ${{ vars.EVA_STAGE_KNOWN_HOSTS }}
+        run: python3 -I -B scripts/eva_test_install.py
