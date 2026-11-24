@@ -38,14 +38,19 @@ SAFE_ERRORS = {
 }
 
 
-def validate_request(value, approved):
-    require(type(value) is dict and value.keys() == {'protocol', 'op', 'run', 'nonce', 'sha', 'artifact', 'size', 'credentials_size'}
+def validate_request(value, approved, policy=None):
+    require(type(value) is dict and value.keys() == {'protocol', 'op', 'run', 'nonce', 'sha', 'artifact', 'size', 'credentials_size', 'policy_sha256'}
             and value['protocol'] == PROTOCOL and value['op'] in ('STAGE', 'STAGE_LIVE', 'CLEANUP')
             and valid_run(value['run']) and type(value['nonce']) is str and NONCE.fullmatch(value['nonce'])
             and type(value['sha']) is str and SHA.fullmatch(value['sha']) and value['sha'] == approved
             and type(value['size']) is int and type(value['credentials_size']) is int
             and (0 < value['credentials_size'] <= 2048 if value['op'] == 'STAGE_LIVE' else value['credentials_size'] == 0),
             'EVA_FRAME_REFUSED')
+    if value['op'] == 'STAGE_LIVE':
+        require(policy is not None and value['policy_sha256'] == sha256(canonical(policy)).hexdigest(),
+                'EVA_LIVE_PROFILE_NOT_PROVISIONED')
+    else:
+        require(value['policy_sha256'] is None, 'EVA_FRAME_REFUSED')
     if value['op'] == 'CLEANUP':
         require(value['artifact'] is None and value['size'] == 0, 'EVA_FRAME_REFUSED')
     else:
@@ -54,10 +59,11 @@ def validate_request(value, approved):
     return value
 
 
-def prefix(op, run, nonce, sha, build, size, credentials=b''):
+def prefix(op, run, nonce, sha, build, size, credentials=b'', policy=None):
     request = {'protocol': PROTOCOL, 'op': op, 'run': run, 'nonce': nonce, 'sha': sha,
-               'artifact': asdict(build) if build is not None else None, 'size': size, 'credentials_size': len(credentials)}
-    data = canonical(validate_request(request, sha))
+               'artifact': asdict(build) if build is not None else None, 'size': size, 'credentials_size': len(credentials),
+               'policy_sha256': None if policy is None else sha256(canonical(policy)).hexdigest()}
+    data = canonical(validate_request(request, sha, policy))
     return MAGIC + len(data).to_bytes(4, 'big') + data + credentials
 
 
@@ -68,7 +74,8 @@ def frame(fd, deadline, approved):
     raw = read_exact(fd, size, deadline)
     value = strict_json(raw.decode('ascii'))
     require(canonical(value) == raw, 'EVA_FRAME_REFUSED')
-    return validate_request(value, approved)
+    policy = load_policy() if type(value) is dict and value.get('op') == 'STAGE_LIVE' else None
+    return validate_request(value, approved, policy)
 
 
 def receive(fd, folder, request, deadline):

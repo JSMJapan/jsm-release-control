@@ -73,12 +73,44 @@ def read_credentials(raw):
     return value
 
 
-def load_policy(root=None):
+def policy_document(root=None):
     folder = Path(__file__).resolve().parent if root is None else Path(root)
     with (folder / 'eva_test_live_policy.json').open('rb') as source:
         raw = source.read(2049)
     require(len(raw) <= 2048, 'EVA_LIVE_PROFILE_NOT_PROVISIONED')
-    return live_policy(raw)
+    return raw
+
+
+def load_policy(root=None):
+    return live_policy(policy_document(root))
+
+
+def approved_policy(preflight_run, sha):
+    """Pick only the reviewed route; use fresh metadata from its approved GitHub run."""
+    import time
+    from apache_parity_bridge import _GitHubGet
+    from eva_test_actions import CONTROL, preflight_binding, preflight_paths
+
+    raw = policy_document()
+    proposed = strict_json(raw.decode('ascii'))
+    reviewed_route = {'status': 'PINNED', 'ingress': 'existing-apache', 'binding': 'PREFLIGHT_REQUIRED',
+                      'origin': 'https://eva-isolated-1620.jsmjapan.com'}
+    if proposed != reviewed_route:
+        return live_policy(raw)
+    require(type(preflight_run) is str and re.fullmatch('[1-9][0-9]{0,14}', preflight_run), 'EVA_ROUTE_PREFLIGHT_REFUSED')
+    prefix = CONTROL + '/check-runs/'
+    fixed = set(preflight_paths(preflight_run))
+
+    def get(path):
+        # All endpoints are public. Use no credentials across repositories.
+        require(path in fixed or re.fullmatch(re.escape(prefix) + r'[1-9][0-9]{0,14}/annotations\?per_page=51', path),
+                'EVA_ROUTE_PREFLIGHT_REFUSED')
+        return _GitHubGet((path,)).get_json(path)
+
+    binding = preflight_binding(get, preflight_run, sha, time.time())
+    fields = {key: binding[key] for key in ('vhost_sha256', 'provider_ipv4', 'certificate_sha256')}
+    resolved = {key: proposed[key] for key in ('status', 'ingress', 'origin')}
+    return live_policy(canonical({**resolved, **fields}))
 
 
 def verify_certificate(certificate, policy):

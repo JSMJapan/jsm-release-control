@@ -264,3 +264,42 @@ class BootstrapTests(unittest.TestCase):
         outer = wrap_root_program(NONCE, capsule(NONCE, public, SHA))
         self.assertLess(len(outer), 119000)
         compile(outer, '<synthetic outer>', 'exec')
+
+
+class RoutePreflightTests(unittest.TestCase):
+    def test_preflight_capsule_is_separate_from_install(self):
+        from eva_test_bootstrap import PREFLIGHT_MODULES, preflight_capsule, preflight_receipt
+        from eva_test_route_preflight import VERSION
+        self.assertNotIn('eva_test_host.py', PREFLIGHT_MODULES)
+        source = preflight_capsule(NONCE)
+        compile(source, '<synthetic read-only responder>', 'exec')
+        self.assertLess(len(source), 110000)
+        detail = {'vhost_sha256': '3' * 64, 'certificate_sha256': '4' * 64,
+                  'publisher_lock': 'OBSERVED_AND_AVAILABLE', 'provider_ipv4': '1.1.1.1',
+                  'log_scope': 'ADMITTED', 'tls': 'LOCAL_SNI_VERIFIED'}
+        child = {'version': VERSION, 'nonce': NONCE, 'euid': 0, 'status': 'OBSERVED', 'binding': detail}
+        envelope = {'version': 'jsm-test-installed-route-outer-v2', 'nonce': NONCE, 'principal': 'marinagurina',
+                    'euid': 10001, 'root_diagnostic': child}
+        self.assertEqual(preflight_receipt(canonical(envelope), NONCE)['binding'], detail)
+        detail['raw_config'] = 'synthetic private contents'
+        with self.assertRaises(archive.EvaRefused):
+            preflight_receipt(canonical(envelope), NONCE)
+
+    def test_live_frame_accepts_only_policy_installed_by_exact_preflight(self):
+        policy = {'status': 'PINNED', 'ingress': 'existing-apache', 'origin': 'https://eva-isolated-1620.jsmjapan.com',
+                  'provider_ipv4': '1.1.1.1', 'certificate_sha256': '4' * 64, 'vhost_sha256': '3' * 64}
+        with patch.object(receiver, 'load_pins', return_value=BUILD):
+            value = receiver.prefix('STAGE_LIVE', RUN, NONCE, SHA, BUILD, 12, b'synthetic', policy)
+            for current in (policy, {**policy, 'vhost_sha256': 'a' * 64}):
+                read, write = os.pipe()
+                try:
+                    os.write(write, value)
+                    os.close(write)
+                    with patch.object(receiver, 'load_policy', return_value=current):
+                        if current == policy:
+                            self.assertEqual(receiver.frame(read, time.monotonic() + 1, SHA)['credentials_size'], 9)
+                        else:
+                            with self.assertRaises(archive.EvaRefused):
+                                receiver.frame(read, time.monotonic() + 1, SHA)
+                finally:
+                    os.close(read)

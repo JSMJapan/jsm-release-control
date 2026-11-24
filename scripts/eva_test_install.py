@@ -22,7 +22,7 @@ from article_test_state import canonical, valid_run
 from eva_test_actions import REPO, artifact_paths, authorize, authorize_artifact, control_paths
 from eva_test_archive import EvaRefused, inspect_archive, load_pins, require
 from eva_test_apache import PUBLIC_ORIGIN
-from eva_test_live import env_credentials, load_policy
+from eva_test_live import approved_policy, env_credentials
 from eva_test_receiver import COMMAND, PROTOCOL, SAFE_ERRORS, SHA, prefix
 from test_api_readonly_access import PIN_SHA256, private_file
 
@@ -78,7 +78,7 @@ def execute(env):
     run = env.get('CLEANUP_RUN', '') if op == 'CLEANUP' else secrets.token_hex(6)
     require(valid_run(run) and (op == 'CLEANUP' or not env.get('CLEANUP_RUN')), 'EVA_GITHUB_CONTEXT_REFUSED')
     authorize(_GitHubGet(control_paths(run_id), token=env.get('GH_TOKEN')), env, run_id, sha)
-    policy = load_policy() if op == 'STAGE_LIVE' else None
+    policy = approved_policy(env.get('ROUTE_PREFLIGHT_RUN'), sha) if op == 'STAGE_LIVE' else None
     credentials = env_credentials(env) if policy is not None else b''
     key, known = env.get('EVA_STAGE_SSH_KEY'), env.get('EVA_STAGE_KNOWN_HOSTS')
     require(type(key) is str and 0 < len(key) <= 16384 and '\0' not in key
@@ -102,7 +102,7 @@ def execute(env):
             download(envelope, token, archive, size, time.monotonic() + 300)
             inspected, _ = inspect_archive(archive, build)
             verify(archive, inspected, time.monotonic() + 180, containerd_layer_sources=True)
-        raw = transfer(transport(identity, hosts), prefix(op, run, nonce, sha, build, size, credentials),
+        raw = transfer(transport(identity, hosts), prefix(op, run, nonce, sha, build, size, credentials, policy),
                        archive, time.monotonic() + 720)
     return {**project(raw, op, run, nonce, build, policy), 'resource': RESOURCE, 'control_sha': sha,
             'workflow_run': 'https://github.com/' + REPO + '/actions/runs/' + run_id}
@@ -121,6 +121,10 @@ def main():
     finally:
         signal.alarm(0)
     sys.stdout.buffer.write(canonical(result))
+    if result['status'] == 'STAGED_LIVE_READY' and os.environ.get('GITHUB_ACTIONS') == 'true':
+        # The projection has an exact allowlist of public evidence and no credentials.
+        print('::notice file=scripts/eva_test_install.py,line=1,title=JSM Eva stage receipt::'
+              + canonical(result).decode('ascii').strip())
     return int(result['status'] == 'BLOCKED')
 
 

@@ -53,7 +53,8 @@ class PatchTests(unittest.TestCase):
                 patched(raw, sha256(raw).hexdigest())
         with self.assertRaises(EvaRefused):
             patched(baseline, 'f' * 64)
-        for fmt in (b'%{Authorization}i', b'%{Set-Cookie}o', b'%{eva_teacher_test}C'):
+        for fmt in (b'%{Authorization}i', b'%{Set-Cookie}o', b'%{eva_teacher_test}C', b'%200,302{Cookie}i', b'%!401{Authorization}i',
+                    b'%200{Set-Cookie}o', b'%!401{eva_teacher_test}C', b'%>200{Set-Cookie}o'):
             unsafe = baseline.replace(b'SSLEngine On', b'SSLEngine On\nLogFormat "' + fmt + b'" unsafe')
             with self.assertRaises(EvaRefused):
                 patched(unsafe, sha256(unsafe).hexdigest())

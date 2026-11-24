@@ -3,24 +3,32 @@
 
 import base64
 from hashlib import sha256
+from io import BytesIO
 import os
 from pathlib import Path
 import re
 import sys
 import time
 import zlib
+from zipfile import ZIP_DEFLATED, ZipFile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from apache_parity_bridge import _GitHubGet, _read_regular, strict_json
-from eva_test_actions import authorize, control_paths
+from article_test_state import canonical
+from eva_test_actions import REPO, authorize, control_paths
 from eva_test_archive import load_pins, require
+from eva_test_live import approved_policy
+from eva_test_route_preflight import VERSION as ROUTE_VERSION
 from test_installer_capture_encrypted import _receive
 from test_installer_receiver_bootstrap_host import HOST_SOURCE
 
 ADMIN_ENV = 'test-api-readonly-access'
 VERSION = 'jsm-eva-bootstrap-1620-v1'
 SCOPE = 'INSTALL_EVA_ONLY_RECEIVER'
+PREFLIGHT_SCOPE = 'OBSERVE_EVA_TEST_ROUTE'
+PREFLIGHT_MODULES = ('apache_parity_bridge.py', 'article_test_artifact.py', 'eva_test_archive.py', 'eva_test_apache.py',
+                     'test_installer_update_package.py', 'test_installer_update_receiver.py', 'eva_test_route_preflight.py')
 ROOT = 'jsm-eva-test-1620'
 ACCOUNT = 'jsm-eva-stage'
 MODULES = (
@@ -68,13 +76,15 @@ def fixed_template():
     return source.removesuffix('\n_boot_main()\n')
 
 
-def capsule(nonce, public, control_sha, root=None):
+def capsule(nonce, public, control_sha, root=None, policy=None):
     require(re.fullmatch('[0-9a-f]{32}', nonce) and re.fullmatch('[0-9a-f]{40}', control_sha),
             'EVA_BOOTSTRAP_CONTEXT_REFUSED')
     root = Path(__file__).resolve().parents[1] if root is None else Path(root)
     load_pins(root / 'scripts/eva_test_pins.json')
     files = {name: _read_regular(root / 'scripts' / name, 65536) for name in MODULES}
     files.update({name: _read_regular(root / 'ops/eva-test-1620' / name, 8192) for name in UNITS})
+    if policy is not None:
+        files['eva_test_live_policy.json'] = canonical(policy)
     files['control.sha'] = (control_sha + '\n').encode('ascii')
     members = {name: ('forced-command' if name == 'eva_test_forced_command.sh' else name,
                   0o755 if name == 'eva_test_forced_command.sh' else 0o444, len(raw), sha256(raw).hexdigest())
@@ -101,37 +111,87 @@ def capsule(nonce, public, control_sha, root=None):
     return encoded
 
 
-def project(raw, nonce):
+def preflight_capsule(nonce, root=None):
+    require(re.fullmatch('[0-9a-f]{32}', nonce), 'EVA_BOOTSTRAP_CONTEXT_REFUSED')
+    root = Path(__file__).resolve().parent if root is None else Path(root)
+    output = BytesIO()
+    with ZipFile(output, 'w', compression=ZIP_DEFLATED) as archive:
+        for name in PREFLIGHT_MODULES:
+            archive.writestr(name, _read_regular(root / name, 65536))
+    payload = base64.b64encode(output.getvalue())
+    source = ("import base64,os,sys; f=os.memfd_create('eva-1620-preflight',0); os.write(f,base64.b64decode("
+              + repr(payload) + ")); sys.path.insert(0,'/proc/self/fd/'+str(f)); "
+              "from eva_test_route_preflight import main; main(" + repr(nonce) + ")")
+    require(len(source) < 110000, 'EVA_BOOTSTRAP_PACKAGE_REFUSED')
+    return source
+
+
+def transport_receipt(raw, nonce):
     outer = strict_json(raw.decode('ascii'))
     root = outer.get('root_diagnostic')
     require(outer.keys() == {'version', 'nonce', 'principal', 'euid', 'root_diagnostic'}
             and outer['version'] == 'jsm-test-installed-route-outer-v2' and outer['nonce'] == nonce
             and outer['principal'] == 'marinagurina' and type(outer['euid']) is int and outer['euid'] > 0
-            and type(root) is dict and root.keys() == {'version', 'nonce', 'euid', 'status'}
-            and root['version'] == VERSION and root['nonce'] == nonce and type(root['euid']) is int and root['euid'] == 0
-            and root['status'] in STATUSES, 'EVA_BOOTSTRAP_RECEIPT_REFUSED')
-    return root['status']
+            and type(root) is dict and root.get('nonce') == nonce
+            and type(root.get('euid')) is int and root['euid'] == 0,
+            'EVA_BOOTSTRAP_RECEIPT_REFUSED')
+    return root
+
+
+def preflight_receipt(raw, nonce):
+    root = transport_receipt(raw, nonce)
+    require(root.keys() == {'version', 'nonce', 'euid', 'status', 'binding'} and root['version'] == ROUTE_VERSION
+            and root['status'] in ('OBSERVED', 'BLOCKED'), 'EVA_BOOTSTRAP_RECEIPT_REFUSED')
+    binding = root['binding']
+    if root['status'] == 'OBSERVED':
+        require(type(binding) is dict and binding.keys() == {'vhost_sha256', 'certificate_sha256', 'publisher_lock',
+                                                             'provider_ipv4', 'log_scope', 'tls'}
+                and all(type(binding[name]) is str and re.fullmatch('[0-9a-f]{64}', binding[name])
+                        for name in ('vhost_sha256', 'certificate_sha256'))
+                and type(binding['provider_ipv4']) is str and re.fullmatch(r'[0-9]{1,3}(?:\.[0-9]{1,3}){3}', binding['provider_ipv4'])
+                and binding['publisher_lock'] == 'OBSERVED_AND_AVAILABLE' and binding['tls'] == 'LOCAL_SNI_VERIFIED'
+                and binding['log_scope'] == 'ADMITTED', 'EVA_BOOTSTRAP_RECEIPT_REFUSED')
+    else:
+        require(binding is None, 'EVA_BOOTSTRAP_RECEIPT_REFUSED')
+    return {'status': root['status'], 'binding': binding}
+
+
+def project(raw, nonce):
+    root = transport_receipt(raw, nonce)
+    require(root.keys() == {'version', 'nonce', 'euid', 'status'}
+            and root['version'] == VERSION and root['status'] in STATUSES, 'EVA_BOOTSTRAP_RECEIPT_REFUSED')
+    return {'status': root['status']}
 
 
 def execute(env):
     sha = env.get('GITHUB_SHA', '')
     run = env.get('GITHUB_RUN_ID', '')
+    operation = env.get('OPERATION')
+    expected = {'BOOTSTRAP': SCOPE, 'PREFLIGHT': PREFLIGHT_SCOPE}
     require(re.fullmatch('[0-9a-f]{40}', sha) and re.fullmatch('[1-9][0-9]{0,14}', run)
-            and env.get('APPROVED_SCOPE') == SCOPE, 'EVA_BOOTSTRAP_CONTEXT_REFUSED')
+            and operation in expected and env.get('APPROVED_SCOPE') == expected[operation], 'EVA_BOOTSTRAP_CONTEXT_REFUSED')
     paths = control_paths(run, environment_name=ADMIN_ENV)
     authorize(_GitHubGet(paths, token=env.get('GH_TOKEN')), env, run, sha, environment_name=ADMIN_ENV, job='bootstrap')
+    if operation == 'PREFLIGHT':
+        raw, nonce = _receive(env, time.monotonic() + 60, preflight_capsule)
+        return {**preflight_receipt(raw, nonce), 'control_sha': sha,
+                'workflow_run': 'https://github.com/' + REPO + '/actions/runs/' + run}
+    policy = approved_policy(env.get('ROUTE_PREFLIGHT_RUN'), sha)
     public = verified_key(env.get('EVA_STAGE_PUBLIC_KEY'), env.get('APPROVED_PUBLIC_KEY_SHA256'))
-    raw, nonce = _receive(env, time.monotonic() + 60, lambda challenge: capsule(challenge, public, sha))
+    raw, nonce = _receive(env, time.monotonic() + 60, lambda challenge: capsule(challenge, public, sha, policy=policy))
     return project(raw, nonce)
 
 
 def main():
     try:
-        status = execute(os.environ)
+        result = execute(os.environ)
     except Exception:
-        status = 'EVA_BOOTSTRAP_REFUSED'
-    print(status)
-    return int(status != 'BOOTSTRAPPED')
+        result = {'status': 'EVA_BOOTSTRAP_REFUSED'}
+    sys.stdout.buffer.write(canonical(result))
+    if result['status'] == 'OBSERVED' and os.environ.get('GITHUB_ACTIONS') == 'true':
+        print('::notice file=scripts/eva_test_bootstrap.py,line=1,title=JSM Eva route preflight receipt::'
+              + canonical(result).decode('ascii').strip())
+    return int(result['status'] not in ('BOOTSTRAPPED', 'OBSERVED'))
 
 
 if __name__ == '__main__':

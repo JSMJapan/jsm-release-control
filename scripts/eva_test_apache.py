@@ -23,7 +23,7 @@ MAX_CONFIG = 65536
 SOCKET_LOCK = Path('/run/jsm-sandbox-deploy.lock')
 INCLUDE = re.compile(rb'^\s*\((?:\*|[0-9]+)\) (/[^\x00-\x20]+)\s*$', re.M)
 SENSITIVE_LOG = re.compile(
-    rb'%\{(?:Authorization|Proxy-Authorization|Cookie|Set-Cookie|X-Eva-Teacher-Secret|eva_teacher_test)\}[iocn]'
+    rb'%[0-9,!<>]*\{(?:Authorization|Proxy-Authorization|Cookie|Set-Cookie|X-Eva-Teacher-Secret|eva_teacher_test)\}[iocn]'
     rb'|(?:^|\n)\s*DumpIO(?:Input|Output)\s+On\b|(?:^|\n)\s*LogLevel[^\n#]*\btrace[5-8]\b', re.I,
 )
 CONFIG = b'''    # BEGIN JSM EVA 1620

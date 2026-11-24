@@ -194,13 +194,12 @@ def observe(docker, identity, store, aliases):
 
 def clean(store, state, deadline):
     require(os.geteuid() == 0, 'EVA_HOST_REFUSED')
-    if state.get('units'):
-        # Revoke live inputs before trying to stop services or inspect Docker.
-        for path in (store.path / 'anthropic.key', store.path / 'input' / 'gate-user',
-                     store.path / 'input' / 'gate-password', store.path / 'input' / 'bridge-secret'):
-            if os.path.lexists(path):
-                require(owned_file(path, (0o600, 0o444)), 'EVA_STATE_REFUSED')
-                path.unlink()
+    # Revoke inputs first, including when provisioning failed before the first unit started.
+    for path in (store.path / 'anthropic.key', store.path / 'input' / 'gate-user',
+                 store.path / 'input' / 'gate-password', store.path / 'input' / 'bridge-secret'):
+        if os.path.lexists(path):
+            require(owned_file(path, (0o600, 0o444)), 'EVA_STATE_REFUSED')
+            path.unlink()
     restore_apache(store, deadline)
     for role in reversed(state.get('units', [])):
         stop_live(store, role, deadline)

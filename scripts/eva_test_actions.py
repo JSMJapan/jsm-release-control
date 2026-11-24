@@ -1,5 +1,8 @@
 """GitHub provenance and protected approval for a finite Eva TEST operation."""
 
+import re
+
+from apache_parity_bridge import strict_json
 from article_test_actions import OWNER_ID, REPO, SOURCE_API, SOURCE_REPO
 from hostinger_preflight import policy_ready
 from eva_test_archive import ARCHIVE_LIMIT, require
@@ -101,3 +104,48 @@ def authorize_artifact(api, build):
             and type(size) is int and 0 < size <= ARCHIVE_LIMIT and linked.get('id') == int(build.run_id)
             and linked.get('head_sha') == build.sha, 'EVA_ARTIFACT_SCOPE_REFUSED')
     return size
+
+
+def preflight_paths(run_id):
+    root = CONTROL + '/actions/runs/' + run_id
+    return root, root + '/attempts/1/jobs', root + '/approvals'
+
+
+def preflight_binding(get, run_id, sha, now):
+    from datetime import datetime
+
+    evidence = 'EVA_ROUTE_PREFLIGHT_REFUSED'
+    require(type(run_id) is str and re.fullmatch('[1-9][0-9]{0,14}', run_id), evidence)
+    run, jobs, approvals = [get(path) for path in preflight_paths(run_id)]
+    require(run.get('id') == int(run_id) and run.get('head_sha') == sha and run.get('head_branch') == 'main'
+            and run.get('path') == WORKFLOW and run.get('run_attempt') == 1 and run.get('event') == 'workflow_dispatch'
+            and run.get('status') == 'completed' and run.get('conclusion') == 'success'
+            and all(owner(run.get(field)) for field in ('actor', 'triggering_actor'))
+            and all(repo_matches(run.get(field), REPO, REPO_ID, False) for field in ('repository', 'head_repository')), evidence)
+    require(type(approvals) is list and len(approvals) == 1 and approvals[0].get('state') == 'approved'
+            and owner(approvals[0].get('user')) and
+            [item.get('name') for item in approvals[0].get('environments', [])] == ['test-api-readonly-access'], evidence)
+    rows = [item for item in jobs.get('jobs', []) if item.get('name') == 'Owner-approved Eva receiver bootstrap on jsm-sandbox']
+    require(len(rows) == 1 and rows[0].get('status') == 'completed' and rows[0].get('conclusion') == 'success', evidence)
+    done = datetime.fromisoformat(rows[0]['completed_at'].replace('Z', '+00:00'))
+    require(done.tzinfo is not None and 0 <= now - done.timestamp() <= 7200, evidence)
+    check = rows[0].get('check_run_url', '')
+    match = re.fullmatch(rf'https://api\.github\.com/repos/{REPO}/check-runs/([1-9][0-9]{{0,14}})', check)
+    require(match, evidence)
+    api_path = CONTROL + '/check-runs/' + match[1] + '/annotations?per_page=51'
+    notes = get(api_path)
+    require(type(notes) is list and len(notes) <= 50, evidence)
+    annotated = [row for row in notes if row.get('title') == 'JSM Eva route preflight receipt']
+    require(len(annotated) == 1 and annotated[0].get('path') == 'scripts/eva_test_bootstrap.py'
+            and annotated[0].get('annotation_level') == 'notice'
+            and type(annotated[0].get('message')) is str and len(annotated[0]['message']) <= 2048, evidence)
+    values = strict_json(annotated[0]['message'])
+    require(type(values) is dict and values.keys() == {'status', 'binding', 'control_sha', 'workflow_run'}
+            and values['status'] == 'OBSERVED' and values['control_sha'] == sha
+            and values['workflow_run'] == 'https://github.com/' + REPO + '/actions/runs/' + run_id, evidence)
+    binding = values['binding']
+    require(type(binding) is dict and binding.keys() == {'vhost_sha256', 'certificate_sha256', 'publisher_lock',
+                                                         'provider_ipv4', 'log_scope', 'tls'}
+            and binding['publisher_lock'] == 'OBSERVED_AND_AVAILABLE' and binding['log_scope'] == 'ADMITTED'
+            and binding['tls'] == 'LOCAL_SNI_VERIFIED', evidence)
+    return binding
