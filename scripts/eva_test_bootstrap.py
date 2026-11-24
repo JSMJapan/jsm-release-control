@@ -18,7 +18,7 @@ from apache_parity_bridge import _GitHubGet, _read_regular, strict_json
 from article_test_state import canonical
 from eva_test_actions import REPO, authorize, control_paths
 from eva_test_archive import load_pins, require
-from eva_test_live import approved_policy
+from eva_test_live import approved_policy, live_policy
 from eva_test_route_preflight import VERSION as ROUTE_VERSION
 from test_installer_capture_encrypted import _receive
 from test_installer_receiver_bootstrap_host import HOST_SOURCE
@@ -27,6 +27,10 @@ ADMIN_ENV = 'test-api-readonly-access'
 VERSION = 'jsm-eva-bootstrap-1620-v1'
 SCOPE = 'INSTALL_EVA_ONLY_RECEIVER'
 PREFLIGHT_SCOPE = 'OBSERVE_EVA_TEST_ROUTE'
+UPGRADE_SCOPE = 'UPGRADE_EVA_ONLY_RECEIVER'
+UPGRADE_VERSION = 'jsm-eva-receiver-upgrade-1620-v1'
+UPGRADE_STATUSES = {'UPGRADED', 'ALREADY_CURRENT', 'INPUT_REFUSED', 'TARGET_REFUSED',
+                    'RECEIVER_BUSY', 'PREVIOUS_REFUSED', 'ROLLED_BACK', 'STATE_UNCERTAIN'}
 PREFLIGHT_MODULES = ('apache_parity_bridge.py', 'hostinger_preflight.py', 'article_test_artifact.py', 'eva_test_archive.py', 'eva_test_apache.py',
                      'test_installer_update_package.py', 'test_installer_update_receiver.py', 'eva_test_route_preflight.py')
 ROOT = 'jsm-eva-test-1620'
@@ -42,6 +46,35 @@ MODULES = (
 )
 UNITS = ('jsm-eva-test-1620-expiry.service', 'jsm-eva-test-1620-expiry.timer')
 STATUSES = {'BOOTSTRAPPED', 'TARGET_REFUSED', 'INPUT_REFUSED', 'PREEXISTING_REFUSED', 'BOOTSTRAP_FAILED', 'STATE_UNCERTAIN'}
+# Byte-for-byte jsm-sandbox receiver from BOOTSTRAP 45340677450.
+# The generated route policy was bound to PREFLIGHT 45340440257.
+PREVIOUS_SHA = '8086f91b8a43cc28dc0a5ff41492606c4774d920'
+PREVIOUS_RECEIVER = {
+    'apache_parity_bridge.py': '4332a64986c8d4313d9e9ba695fabfb04e98efa941b29fa4e4012272953aaaa4',
+    'article_test_actions.py': '771a871e10e4ac28417776185b72871b79ecf14ecb20370f2c35f944bbd8d656',
+    'article_test_artifact.py': '6e9c22885703eab9aaf032191c7e17e3072bce369bcfd4211179cc67be1987bd',
+    'article_test_docker.py': 'e17d816647306852bc7bda6a1beff0a6449a00240260571e292de2aef91041ea',
+    'article_test_host.py': 'a26eebb0244c9ec1af88bae24e1a96d08640bb6f13dd26ed9fc09aa2a66e2ef9',
+    'article_test_images.py': '32f38456ccd2874d87d6ab0e1d3da19d2979b59649b23eb1005112110aeabb0c',
+    'article_test_receiver.py': '88c723d10a7677dabf9c374e4ceff8967c0d41368c1ccf771998e451dd8ab3b6',
+    'article_test_smoke.py': '9a44d5f58099f1028d5d2bc9d4827b8dd2d9179fbe2cc92c214024461eef2c01',
+    'article_test_state.py': 'c4a6c1b0a42395cedb1453cee8f3b5cc38dc0917677d971dfc99833aa956abfd',
+    'control.sha': '26a46a58a09d0abd3a25c59807814c0628f7e6ac3008f0d7d106c599addbf973',
+    'eva_test_apache.py': 'f3061ec20f2d4556135b1ed79463f7348d6c202bfb60457e5e3dcc6ebbd134e3',
+    'eva_test_archive.py': 'c79f8ea2a00cf53ab61ef170a96f67369554ce6c2fb8c2b1398b422e9eb2df5e',
+    'eva_test_host.py': '1bb01ab6a9a558f96bdc8fec04a1339743e66a0e5b7ff38a066b3b74c7f1abe2',
+    'eva_test_ingress.py': '9baf75423e0dcdc7b0412b6fb751e0a429d6184c628e681610b725a38850dfa0',
+    'eva_test_live.py': '8c01c36ab000445f10dd35ad06d988b987d30c89000a77a65bc78e218dc0b381',
+    'eva_test_live_policy.json': '69e951bffdabcf95a1ad01d1156fa36b52ecfe5174fcfaa1f68c863e05948c03',
+    'eva_test_pins.json': 'a8eea3db5c4ceb6385e8d0ded74a7a1cb4c1534ec932aaab727baad719b1cf45',
+    'eva_test_receiver.py': 'cfda491628d758c064e271067a7098032136a48ef2600e5b38bfc98d6b147a29',
+    'forced-command': 'b71e291efdde011e36feea8b2841e5735eb60764b6344303b9ace7b0582b4199',
+    'hostinger_preflight.py': 'edb8a35940ad886f3e3ccf1e205054b5d64b23d328462dc5bd921ff422904cbc',
+    'login-shell': '0e07ffeba12bb0a669544ff67cb21ae8f05b4477df54ae2aaf8b8a4083709d12',
+    'test_api_readonly_access.py': '91d26cff6e35a9edc5aeada3c7a3d4f1117720655ddec7cf4b63553fed241e25',
+    'test_installer_update_package.py': 'e40fd150cd9b3f639db36024344a1962f96845cfd287077f56df2300e1c79fe5',
+    'test_installer_update_receiver.py': '092850b35c348f46d5b02a147a28d94bcd6411b307be8120495c72eb8c6b3a74',
+}
 
 
 def verified_key(text, fingerprint):
@@ -126,6 +159,33 @@ def preflight_capsule(nonce, root=None):
     return source
 
 
+def upgrade_capsule(nonce, control_sha, policy, root=None):
+    require(re.fullmatch('[0-9a-f]{32}', nonce) and re.fullmatch('[0-9a-f]{40}', control_sha)
+            and control_sha != PREVIOUS_SHA, 'EVA_BOOTSTRAP_CONTEXT_REFUSED')
+    folder = Path(__file__).resolve().parent if root is None else Path(root)
+    fixed = _read_regular(folder / 'eva_test_host.py', 65536)
+    require(sha256(fixed).hexdigest() != PREVIOUS_RECEIVER['eva_test_host.py'],
+            'EVA_UPGRADE_REQUIRES_FIXED_HOST_MODULE')
+    for module in MODULES:
+        if module in ('eva_test_host.py', 'eva_test_live_policy.json'):
+            continue
+        installed = 'forced-command' if module == 'eva_test_forced_command.sh' else module
+        require(sha256(_read_regular(folder / module, 65536)).hexdigest() == PREVIOUS_RECEIVER[installed],
+                'EVA_UPGRADE_MODULE_DRIFT')
+    validated = live_policy(canonical(policy))
+    require(validated['ingress'] == 'existing-apache', 'EVA_ROUTE_PREFLIGHT_REFUSED')
+    replacements = {'control.sha': (control_sha + '\n').encode('ascii'),
+                    'eva_test_host.py': fixed, 'eva_test_live_policy.json': canonical(validated)}
+    program = _read_regular(folder / 'eva_test_receiver_upgrade_host.py', 65536).decode('ascii')
+    source = (fixed_template() + '\n' + program +
+              f'\nupgrade_main({nonce!r}, {replacements!r}, {PREVIOUS_RECEIVER!r}, {UPGRADE_VERSION!r})\n')
+    compile(source, '<Eva TEST upgrade>', 'exec')
+    payload = base64.b64encode(zlib.compress(source.encode('ascii'), level=9))
+    encoded = f'import base64,zlib;exec(compile(zlib.decompress(base64.b64decode({payload!r})), "<Eva TEST upgrade>", "exec"))'
+    require(len(encoded) < 110000, 'EVA_BOOTSTRAP_PACKAGE_REFUSED')
+    return encoded
+
+
 def transport_receipt(raw, nonce):
     outer = strict_json(raw.decode('ascii'))
     root = outer.get('root_diagnostic')
@@ -156,10 +216,10 @@ def preflight_receipt(raw, nonce):
     return {'status': root['status'], 'binding': binding}
 
 
-def project(raw, nonce):
+def project(raw, nonce, version=VERSION, statuses=STATUSES):
     root = transport_receipt(raw, nonce)
     require(root.keys() == {'version', 'nonce', 'euid', 'status'}
-            and root['version'] == VERSION and root['status'] in STATUSES, 'EVA_BOOTSTRAP_RECEIPT_REFUSED')
+            and root['version'] == version and root['status'] in statuses, 'EVA_BOOTSTRAP_RECEIPT_REFUSED')
     return {'status': root['status']}
 
 
@@ -167,7 +227,7 @@ def execute(env):
     sha = env.get('GITHUB_SHA', '')
     run = env.get('GITHUB_RUN_ID', '')
     operation = env.get('OPERATION')
-    expected = {'BOOTSTRAP': SCOPE, 'PREFLIGHT': PREFLIGHT_SCOPE}
+    expected = {'BOOTSTRAP': SCOPE, 'PREFLIGHT': PREFLIGHT_SCOPE, 'UPGRADE_RECEIVER': UPGRADE_SCOPE}
     require(re.fullmatch('[0-9a-f]{40}', sha) and re.fullmatch('[1-9][0-9]{0,14}', run)
             and operation in expected and env.get('APPROVED_SCOPE') == expected[operation], 'EVA_BOOTSTRAP_CONTEXT_REFUSED')
     paths = control_paths(run, environment_name=ADMIN_ENV)
@@ -177,6 +237,9 @@ def execute(env):
         return {**preflight_receipt(raw, nonce), 'control_sha': sha,
                 'workflow_run': 'https://github.com/' + REPO + '/actions/runs/' + run}
     policy = approved_policy(env.get('ROUTE_PREFLIGHT_RUN'), sha)
+    if operation == 'UPGRADE_RECEIVER':
+        raw, nonce = _receive(env, time.monotonic() + 60, lambda challenge: upgrade_capsule(challenge, sha, policy))
+        return project(raw, nonce, UPGRADE_VERSION, UPGRADE_STATUSES)
     public = verified_key(env.get('EVA_STAGE_PUBLIC_KEY'), env.get('APPROVED_PUBLIC_KEY_SHA256'))
     raw, nonce = _receive(env, time.monotonic() + 60, lambda challenge: capsule(challenge, public, sha, policy=policy))
     return project(raw, nonce)
@@ -191,7 +254,7 @@ def main():
     if result['status'] == 'OBSERVED' and os.environ.get('GITHUB_ACTIONS') == 'true':
         print('::notice file=scripts/eva_test_bootstrap.py,line=1,title=JSM Eva route preflight receipt::'
               + canonical(result).decode('ascii').strip())
-    return int(result['status'] not in ('BOOTSTRAPPED', 'OBSERVED'))
+    return int(result['status'] not in ('BOOTSTRAPPED', 'OBSERVED', 'UPGRADED', 'ALREADY_CURRENT'))
 
 
 if __name__ == '__main__':
