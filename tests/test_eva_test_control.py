@@ -4,6 +4,7 @@ from dataclasses import asdict
 from hashlib import sha256
 import os
 from pathlib import Path
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import time
@@ -284,6 +285,20 @@ class RoutePreflightTests(unittest.TestCase):
         detail['raw_config'] = 'synthetic private contents'
         with self.assertRaises(archive.EvaRefused):
             preflight_receipt(canonical(envelope), NONCE)
+
+    @unittest.skipUnless(sys.platform == 'linux' and hasattr(os, 'memfd_create'), 'native Linux memfd required')
+    def test_preflight_imports_its_memfd_closure_without_host_access(self):
+        import json
+        from eva_test_bootstrap import preflight_capsule
+        from eva_test_route_preflight import VERSION
+        # Simulate a non-root UID to force refusal before any metadata or Apache command.
+        program = 'import os; os.geteuid = lambda: 65534\n' + preflight_capsule(NONCE)
+        result = subprocess.run([sys.executable, '-I', '-B', '-S', '-c', program], cwd='/',
+                                capture_output=True, check=True, timeout=5)
+        outcome = json.loads(result.stdout)
+        self.assertEqual(outcome, {'version': VERSION, 'nonce': NONCE, 'euid': 65534,
+                                   'status': 'BLOCKED', 'binding': None})
+        self.assertEqual(result.stderr, b'')
 
     def test_live_frame_accepts_only_policy_installed_by_exact_preflight(self):
         policy = {'status': 'PINNED', 'ingress': 'existing-apache', 'origin': 'https://eva-isolated-1620.jsmjapan.com',

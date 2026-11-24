@@ -27,7 +27,7 @@ ADMIN_ENV = 'test-api-readonly-access'
 VERSION = 'jsm-eva-bootstrap-1620-v1'
 SCOPE = 'INSTALL_EVA_ONLY_RECEIVER'
 PREFLIGHT_SCOPE = 'OBSERVE_EVA_TEST_ROUTE'
-PREFLIGHT_MODULES = ('apache_parity_bridge.py', 'article_test_artifact.py', 'eva_test_archive.py', 'eva_test_apache.py',
+PREFLIGHT_MODULES = ('apache_parity_bridge.py', 'hostinger_preflight.py', 'article_test_artifact.py', 'eva_test_archive.py', 'eva_test_apache.py',
                      'test_installer_update_package.py', 'test_installer_update_receiver.py', 'eva_test_route_preflight.py')
 ROOT = 'jsm-eva-test-1620'
 ACCOUNT = 'jsm-eva-stage'

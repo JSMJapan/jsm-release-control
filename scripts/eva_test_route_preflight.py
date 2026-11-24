@@ -26,7 +26,7 @@ def metadata():
         verify_logs(includes)
         listing = apache('-S')
         pattern = rb'\s*(?:(?:\*|[0-9.]+):443 |port 443 namevhost )' + re.escape(PUBLIC_HOST.encode('ascii'))
-        pattern += rb' \((/etc/apache2/sites-enabled/jsm-sandbox-443\.conf):[0-9]+\)'
+        pattern += rb' \((/etc/apache2/sites-(?:enabled|available)/jsm-sandbox-443\.conf):[0-9]+\)'
         active = [row for row in listing.splitlines() if re.fullmatch(pattern, row)]
         if len(active) != 1:
             raise ValueError('EVA_PREFLIGHT_VHOST_REFUSED')
