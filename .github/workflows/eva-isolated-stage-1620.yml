@@ -14,16 +14,16 @@ on:
         required: true
         type: string
       operation:
-        description: Provision the dedicated receiver, stage an isolated profile, or clean up one exact run
+        description: Provision or upgrade the dedicated receiver, stage an isolated profile, or clean up one exact run
         required: true
         type: choice
-        options: [PREFLIGHT, BOOTSTRAP, STAGE, STAGE_LIVE, CLEANUP]
+        options: [PREFLIGHT, BOOTSTRAP, UPGRADE_RECEIVER, STAGE, STAGE_LIVE, CLEANUP]
       cleanup_run:
         description: Twelve lowercase hexadecimal characters from the Eva receipt
         required: false
         type: string
       route_preflight_run:
-        description: BOOTSTRAP and STAGE_LIVE only. Successful PREFLIGHT run on this exact main SHA
+        description: BOOTSTRAP, UPGRADE_RECEIVER and STAGE_LIVE only. Successful PREFLIGHT run on this exact main SHA
         required: false
         type: string
       receiver_public_key:
@@ -58,12 +58,18 @@ jobs:
             sudo apt-get install -y --no-install-recommends apache2
           fi
       - run: python3 -B -m unittest discover -s tests -p 'test_*.py'
+      - name: Verify the exact Eva boundary on disposable Docker containers
+        if: github.event_name == 'pull_request'
+        run: |
+          sudo -n /usr/bin/docker --host unix:///run/docker.sock version --format '{{.Server.Version}}'
+          sudo -n /usr/bin/docker --host unix:///run/docker.sock pull --quiet docker.io/library/busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+          sudo -n env JSM_EVA_NATIVE_DOCKER=1 python3 -B -m unittest discover -s tests -p test_eva_test_boundary.py -v
       - run: sh -n scripts/eva_test_forced_command.sh
       - run: echo '::notice file=scripts/eva_test_install.py,line=1,title=JSM Eva offline fixture::Offline test receipt transport'
   install:
     name: Owner-approved finite Eva TEST operation
     needs: offline
-    if: inputs.operation != 'BOOTSTRAP' && inputs.operation != 'PREFLIGHT' && github.event_name == 'workflow_dispatch' && github.repository == 'JSMJapan/jsm-release-control' && github.event.repository.private == false && github.actor == 'JSMJapan' && github.triggering_actor == 'JSMJapan' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && inputs.approved_sha == github.sha
+    if: inputs.operation != 'BOOTSTRAP' && inputs.operation != 'PREFLIGHT' && inputs.operation != 'UPGRADE_RECEIVER' && github.event_name == 'workflow_dispatch' && github.repository == 'JSMJapan/jsm-release-control' && github.event.repository.private == false && github.actor == 'JSMJapan' && github.triggering_actor == 'JSMJapan' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && inputs.approved_sha == github.sha
     runs-on: ubuntu-24.04
     timeout-minutes: 28
     environment: eva-isolated-stage-1620
@@ -107,7 +113,7 @@ jobs:
   bootstrap:
     name: Owner-approved Eva receiver bootstrap on jsm-sandbox
     needs: offline
-    if: (inputs.operation == 'BOOTSTRAP' || inputs.operation == 'PREFLIGHT') && github.event_name == 'workflow_dispatch' && github.repository == 'JSMJapan/jsm-release-control' && github.event.repository.private == false && github.actor == 'JSMJapan' && github.triggering_actor == 'JSMJapan' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && inputs.approved_sha == github.sha
+    if: (inputs.operation == 'BOOTSTRAP' || inputs.operation == 'PREFLIGHT' || inputs.operation == 'UPGRADE_RECEIVER') && github.event_name == 'workflow_dispatch' && github.repository == 'JSMJapan/jsm-release-control' && github.event.repository.private == false && github.actor == 'JSMJapan' && github.triggering_actor == 'JSMJapan' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && inputs.approved_sha == github.sha
     runs-on: ubuntu-24.04
     timeout-minutes: 3
     environment: test-api-readonly-access
@@ -119,11 +125,11 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Install only the approved Eva receiver and expiry unit files
+      - name: Observe the route or maintain only the approved Eva receiver
         env:
           APPROVED_SHA: ${{ inputs.approved_sha }}
           OPERATION: ${{ inputs.operation }}
-          APPROVED_SCOPE: ${{ inputs.operation == 'PREFLIGHT' && 'OBSERVE_EVA_TEST_ROUTE' || 'INSTALL_EVA_ONLY_RECEIVER' }}
+          APPROVED_SCOPE: ${{ inputs.operation == 'PREFLIGHT' && 'OBSERVE_EVA_TEST_ROUTE' || inputs.operation == 'UPGRADE_RECEIVER' && 'UPGRADE_EVA_ONLY_RECEIVER' || 'INSTALL_EVA_ONLY_RECEIVER' }}
           APPROVED_PUBLIC_KEY_SHA256: ${{ inputs.receiver_public_key_sha256 }}
           ROUTE_PREFLIGHT_RUN: ${{ inputs.route_preflight_run }}
           EVA_STAGE_PUBLIC_KEY: ${{ inputs.receiver_public_key }}
