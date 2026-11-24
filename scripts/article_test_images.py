@@ -128,13 +128,56 @@ class ImageProof:
             for native,config,manifest in zip(self.image_ids,self.config_ids,self.manifest_ids))
 
 
-def verify(path,inspected,deadline):
-    try:return _verify(path,inspected,deadline)
+def verify_legacy_containerd(path, inspected, deadline, paths, selected, configs):
+    """Containerd exports bounded Docker compatibility records alongside OCI blobs."""
+    records = {}
+    with image_tar(path, inspected, deadline) as (tar, _):
+        for entry in tar:
+            if entry.name not in paths:
+                continue
+            require(re.fullmatch(r'blobs/sha256/[0-9a-f]{64}', entry.name) and 1 <= entry.size <= 8192)
+            raw = small(tar, entry)
+            require(config_path(entry.name, 'sha256:' + sha256(raw).hexdigest()))
+            value = strict_json(raw.decode('utf-8'))
+            fields = {'id', 'os', 'created', 'container_config'}
+            require(type(value) is dict and fields <= set(value) <= fields | {'parent', 'config', 'architecture'}
+                    and value['os'] == 'linux' and type(value['id']) is str and SHA.fullmatch(value['id'])
+                    and type(value['container_config']) is dict and type(value['created']) is str
+                    and ('parent' not in value or type(value['parent']) is str and SHA.fullmatch(value['parent']))
+                    and value['id'] not in records)
+            if 'config' in value:
+                require(type(value['config']) is dict and value.get('architecture') == 'amd64')
+            else:
+                require('architecture' not in value)
+            records[value['id']] = value
+    require(len(records) == len(paths))
+    terminal = [value for value in records.values() if 'config' in value]
+    require(len(terminal) == len(selected))
+    visited = set()
+    for row in selected.values():
+        runtime = configs[row['Config']][0]['config']
+        matching = [value for value in terminal if all(
+            (value['config'].get(field) or None) == (runtime.get(field) or None)
+            for field in ('User', 'Entrypoint', 'Volumes', 'Labels'))]
+        require(len(matching) == 1)
+        current = matching[0]['id']
+        depth = 0
+        while current is not None:
+            require(current in records and current not in visited)
+            visited.add(current)
+            depth += 1
+            current = records[current].get('parent')
+        require(depth == len(row['Layers']))
+    require(visited == set(records))
+
+
+def verify(path,inspected,deadline,*,containerd_layer_sources=False):
+    try:return _verify(path,inspected,deadline,containerd_layer_sources)
     except ImageRefused:raise
     except Exception:raise ImageRefused('ARTICLE_IMAGE_ENVELOPE_REFUSED') from None
 
 
-def _verify(path,inspected,deadline):
+def _verify(path,inspected,deadline,containerd_layer_sources=False):
     require(type(inspected) is Inspected)
     images=(inspected.app_image,inspected.mysql_image);expected_tags=inspected.build.tags
     inventory={};metadata={};configs={}
@@ -150,7 +193,9 @@ def _verify(path,inspected,deadline):
     manifests=metadata.get('manifest.json');require(type(manifests) is list and len(manifests)==2)
     selected={};config_paths=set();allowed=set(metadata);by_tag={}
     for row in manifests:
-        require(type(row) is dict and set(row)=={'Config','RepoTags','Layers'}
+        fields={'Config','RepoTags','Layers'}
+        if containerd_layer_sources and type(row) is dict and 'LayerSources' in row:fields.add('LayerSources')
+        require(type(row) is dict and set(row)==fields
                 and type(row['RepoTags']) is list and len(row['RepoTags'])==1)
         reference=tag(row['RepoTags'][0],expected_tags);require(reference not in selected)
         name=row['Config'];require(type(name) is str and name in inventory and not inventory[name][1])
@@ -217,13 +262,19 @@ def _verify(path,inspected,deadline):
                     and manifest['config']['digest']==config_id and manifest['config']['size']==inventory[name][0]
                     and tuple(descriptor(layer) for layer in manifest['layers'])==tuple(layers)
                     and all(layer['size']==inventory[path][0] for layer,path in zip(manifest['layers'],layers)))
+            if 'LayerSources' in row:
+                sources=row['LayerSources']
+                require(type(sources) is dict and set(sources)==set(rootfs['diff_ids'])
+                    and all(sources[diff]==item for diff,item in zip(rootfs['diff_ids'],manifest['layers'])))
             for layer in manifest['layers']:
                 kind=layer.get('mediaType');require(kind in ('application/vnd.oci.image.layer.v1.tar+gzip','application/vnd.oci.image.layer.v1.tar'))
                 layer_path=descriptor(layer);require(layer_path not in compressions or compressions[layer_path]==kind);compressions[layer_path]=kind
+        require('LayerSources' not in row or bool(oci))
         require(image_id in (config_id,manifest_id));manifest_ids.append(manifest_id)
         by_tag[reference]=(name,tuple(layers))
     if 'repositories' in metadata:
-        repositories=metadata['repositories'];require(type(repositories) is dict and set(repositories)=={'jsm-article-test','jsm-article-mysql'})
+        names={value.rsplit(':',1)[0] for value in expected_tags} if containerd_layer_sources else {'jsm-article-test','jsm-article-mysql'}
+        repositories=metadata['repositories'];require(type(repositories) is dict and set(repositories)==names)
         for name,rows in repositories.items():
             require(type(rows) is dict and set(rows)=={inspected.build.sha} and type(rows[inspected.build.sha]) is str and SHA.fullmatch(rows[inspected.build.sha]))
     # Legacy per-layer metadata is safe only inside a referenced layer directory.
@@ -231,7 +282,12 @@ def _verify(path,inspected,deadline):
         if layer.endswith('/layer.tar'):
             parent=layer.rsplit('/',1)[0]
             allowed.update(name for name in (parent+'/json',parent+'/VERSION') if name in inventory)
-    require(all(directory or name in allowed for name,(_,directory) in inventory.items()))
+    extras={name for name,(_,directory) in inventory.items() if not directory and name not in allowed}
+    if extras and containerd_layer_sources:
+        require(bool(oci) and all('LayerSources' in row for row in selected.values()))
+        verify_legacy_containerd(path,inspected,deadline,extras,selected,configs)
+    else:
+        require(not extras)
     sizes={}
     with image_tar(path,inspected,deadline) as (tar,_):
         for entry in tar:

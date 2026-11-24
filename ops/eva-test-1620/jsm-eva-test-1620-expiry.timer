@@ -1,0 +1,10 @@
+[Unit]
+Description=Recover expired isolated Eva TEST resources after restart
+
+[Timer]
+OnCalendar=minutely
+Persistent=true
+AccuracySec=2s
+
+[Install]
+WantedBy=timers.target
