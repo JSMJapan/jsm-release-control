@@ -280,17 +280,39 @@ def prove_boundary(docker, identity, store, role, aliases, db=None, *, live=Fals
             and row['log'] == {'Type': 'json-file', 'Config': {'max-size': '2m', 'max-file': '1'}}
             and [value.removeprefix('CAP_') for value in row['capdrop']] == (['ALL'] if is_app else ['NET_RAW'])
             and (not is_app or row['security'] in (['no-new-privileges'], ['no-new-privileges=true']))
-            and type(mounts) is list and len(mounts) == len(expected) + len(tmpfs), 'EVA_ISOLATION_REFUSED')
+            and type(mounts) is list and len(expected) <= len(mounts) <= len(expected) + len(tmpfs),
+            'EVA_ISOLATION_REFUSED')
     seen = set()
     for mount_row in mounts:
+        require(type(mount_row) is dict, 'EVA_ISOLATION_REFUSED')
         dest = mount_row.get('Destination')
-        require(dest not in seen and ((dest in expected and mount_row.get('Source') == str(expected[dest][0])
+        require(type(dest) is str and dest not in seen
+                and ((dest in expected and mount_row.get('Source') == str(expected[dest][0])
                 and mount_row.get('Type') == 'bind' and mount_row.get('RW') is expected[dest][1]
                 and mount_row.get('Propagation') == 'rprivate')
                 or (dest in tmpfs and mount_row.get('Type') == 'tmpfs' and mount_row.get('RW') is True)),
                 'EVA_ISOLATION_REFUSED')
         seen.add(dest)
+    # CLI --tmpfs lives in HostConfig.Tmpfs. Docker can omit it from Mounts.
+    require(seen.issuperset(expected), 'EVA_ISOLATION_REFUSED')
     return row
+
+
+def prove_tmpfs_mounts(docker, identity, configured):
+    targets = {path.encode('ascii') for path in configured}
+    required_flags = {b'rw', b'noexec', b'nosuid', b'nodev'}
+    seen = set()
+    raw = docker.run(('exec', identity, 'cat', '/proc/self/mountinfo'), limit=32768)
+    for line in raw.splitlines():
+        mount, separator, filesystem = line.partition(b' - ')
+        fields = mount.split()
+        if len(fields) < 6 or fields[4] not in targets:
+            continue
+        target = fields[4]
+        require(target not in seen and separator and filesystem.startswith(b'tmpfs ')
+                and required_flags.issubset(fields[5].split(b',')), 'EVA_ISOLATION_REFUSED')
+        seen.add(target)
+    require(seen == targets, 'EVA_ISOLATION_REFUSED')
 
 
 def assert_loopback(docker, identity):
@@ -310,6 +332,7 @@ def start_role(docker, store, state, role, exact_image, db=None, *, live=False):
     prove_boundary(docker, identity, store, role, state['aliases'][index], db, live=live)
     docker.start(identity)
     running = prove_boundary(docker, identity, store, role, state['aliases'][index], db, live=live)
+    prove_tmpfs_mounts(docker, identity, running['tmpfs'])
     assert_loopback(docker, identity)
     net = namespace(running['pid'])
     require(net != namespace(os.getpid()), 'EVA_ISOLATION_REFUSED')

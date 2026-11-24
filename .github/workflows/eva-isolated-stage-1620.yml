@@ -58,6 +58,12 @@ jobs:
             sudo apt-get install -y --no-install-recommends apache2
           fi
       - run: python3 -B -m unittest discover -s tests -p 'test_*.py'
+      - name: Verify the exact Eva boundary on disposable Docker containers
+        if: github.event_name == 'pull_request'
+        run: |
+          sudo -n /usr/bin/docker --host unix:///run/docker.sock version --format '{{.Server.Version}}'
+          sudo -n /usr/bin/docker --host unix:///run/docker.sock pull --quiet docker.io/library/busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+          sudo -n env JSM_EVA_NATIVE_DOCKER=1 python3 -B -m unittest discover -s tests -p test_eva_test_boundary.py -v
       - run: sh -n scripts/eva_test_forced_command.sh
       - run: echo '::notice file=scripts/eva_test_install.py,line=1,title=JSM Eva offline fixture::Offline test receipt transport'
   install:
